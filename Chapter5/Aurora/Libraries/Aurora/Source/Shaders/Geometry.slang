@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,6 +26,8 @@ interface IGeometry
     bool hasTexCoords();
     bool hasNormals();
     bool hasTangents();
+    bool isOpaque();
+    int getBufferOffset();
 };
 
 
@@ -38,6 +40,7 @@ struct ShadingData
     float2 texCoord;       // the shading texture coordinates, interpolated from adjancent vertices
     float3 tangent;        // the shading tangent (X), interpolated from adjacent vertices
     float3 bitangent;      // the shading bitangent (Y), interpolated from adjacent vertices
+    float3 bitangentWorld; // MaterialX (>= 1.39.x) compatibility alias (same as bitangent)
     float3 objectNormal;   // the shading position in object space (not world space). Used only in
                            // materialX generated code.
     float3 objectPosition; // the shading normal in object space (not world space). Used only in
@@ -178,6 +181,7 @@ ShadingData computeShadingData<GeometryType : IGeometry>(
 
     // Generate bitangent from normal and tangent.
     shading.bitangent = computeBitangent(shading.normal, shading.tangent);
+    shading.bitangentWorld = shading.bitangent; // Keep MaterialX (>= 1.39.x) alias in sync
 
     shading.objToWorld = objToWorld;
 

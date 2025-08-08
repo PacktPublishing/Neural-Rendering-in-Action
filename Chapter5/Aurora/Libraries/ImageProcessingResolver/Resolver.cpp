@@ -1,4 +1,4 @@
-// Copyright 2024 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -40,6 +40,8 @@
 #include <thread>
 
 using namespace pxr;
+
+AR_DEFINE_RESOLVER(ImageProcessingResolverPlugin, ArDefaultResolver);
 
 HioFormat convertToFloat(HioFormat format)
 {
@@ -206,6 +208,7 @@ std::shared_ptr<ArAsset> ImageProcessingResolverPlugin::_OpenAsset(
             image->Read(imageData);
 
             // Get the maxDim query parameter, default to 16k if not specified.
+            // Note: Mac GPU family Apple3 or later has a limit of 16k.
             int maxDim = 16 * 1024;
             cacheEntry.getQuery("maxDim", &maxDim);
 
@@ -264,7 +267,7 @@ std::shared_ptr<ArAsset> ImageProcessingResolverPlugin::_OpenAsset(
                 OIIO::TypeDesc type = convertToOIIODataType(hioType);
                 OIIO::ImageSpec origImageSpec(imageData.width, imageData.height, nChannels, type);
                 OIIO::ImageBuf origBuf(origImageSpec, imageData.data);
-                convertedBuf.resize(imageData.width * imageData.height * nChannels * sizeof(float));
+                convertedBuf.resize(static_cast<size_t>(imageData.width) * static_cast<size_t>(imageData.height) * static_cast<size_t>(nChannels) * sizeof(float));
                 origBuf.get_pixels(OIIO::ROI::All(), OIIO::TypeDesc::FLOAT, convertedBuf.data());
                 imageData.data   = convertedBuf.data();
                 imageData.format = convertToFloat(imageData.format);

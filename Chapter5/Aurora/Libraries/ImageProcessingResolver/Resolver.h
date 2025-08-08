@@ -26,6 +26,11 @@
 #pragma warning(disable : 4267) // disable harmhash.h warning conversion from 'size_t' to 'uint32_t'
 #pragma warning(                                                                                   \
         disable : 4456) // disable harmhash.h warning declaration hides previous local declaration
+#pragma warning(disable : 4996) // disable format.h warning about non-Standard extensions.
+
+// Include OpenImageIO compatibility before OpenImageIO headers
+#include "OpenImageIOCompat.h"
+
 #include "OpenImageIO/imagebuf.h"
 #include "OpenImageIO/imagebufalgo.h"
 #include "OpenImageIO/imageio.h"
@@ -154,12 +159,12 @@ protected:
     // Overriden ArResolver::_CreateIdentifier implementation.
     std::string _CreateIdentifier(
         const std::string& assetPath, const pxr::ArResolvedPath& anchorAssetPath) const override;
-    // Overriden ArResolver::_CreateIdentifierForNewAsset implementation.
 
-    // Utility function to create identifier from URI, and add to cache.
+    // Overriden ArResolver::_CreateIdentifierForNewAsset implementation.
     std::string _CreateIdentifierForNewAsset(
         const std::string& assetPath, const pxr::ArResolvedPath& anchorAssetPath) const override;
 
+    // Utility function to create identifier from URI, and add to cache.
     std::string CreateIdentifierFromURI(
         const std::string& assetPath, const pxr::ArResolvedPath& anchorAssetPath) const;
 

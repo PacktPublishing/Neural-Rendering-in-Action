@@ -1,12 +1,16 @@
+// Copyright 2025 Autodesk, Inc.
 //
-// Copyright 2023 by Autodesk, Inc.  All rights reserved.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// This computer source code and related instructions and comments
-// are the unpublished confidential and proprietary information of
-// Autodesk, Inc. and are protected under applicable copyright and
-// trade secret law.  They may not be disclosed to, copied or used
-// by any third party without the prior written consent of Autodesk, Inc.
+// http://www.apache.org/licenses/LICENSE-2.0
 //
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 #include "pch.h"
 
 #include "MaterialShader.h"
@@ -15,13 +19,13 @@ BEGIN_AURORA
 
 MaterialShader::MaterialShader(MaterialShaderLibrary* pShaderLibrary, int libraryIndex,
     const MaterialShaderDefinition& def, const vector<string> entryPoints) :
+    _entryPointsTypes(entryPoints),
     _pShaderLibrary(pShaderLibrary),
     _libraryIndex(libraryIndex),
-    _entryPointsTypes(entryPoints),
     _def(def)
 {
     // Initialize ref. counts to zero.
-    for (int i = 0; i < entryPoints.size(); i++)
+    for (size_t i = 0; i < entryPoints.size(); i++)
     {
         _entryPointNameLookup[entryPoints[i]] = i;
         _entryPoints.push_back({ entryPoints[i], 0 });
@@ -251,7 +255,7 @@ bool MaterialShaderLibrary::update(CompileShader compileFunction, DestroyShader 
 void MaterialShaderLibrary::forceRebuildAll()
 {
     // Add all active shaders to compilation pending list.
-    for (int i = 0; i < _shaderState.size(); i++)
+    for (size_t i = 0; i < _shaderState.size(); i++)
     {
         MaterialShaderPtr pShader = _shaderState[i].first.lock();
         if (pShader)

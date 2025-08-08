@@ -1,4 +1,4 @@
-// Copyright 2022 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ HGIMaterial::HGIMaterial(HGIRenderer* pRenderer, const string& name, MaterialSha
 {
     // Create buffer descriptor, passing material as initial data.
     HgiBufferDesc uboDesc;
-    uboDesc.debugName = "Material UBO";
+    uboDesc.debugName = name;
     uboDesc.usage     = HgiBufferUsageUniform | HgiBufferUsageRayTracingExtensions |
         HgiBufferUsageShaderDeviceAddress;
     uboDesc.byteSize = uniformBuffer().size();
@@ -40,7 +40,7 @@ void HGIMaterial::update()
 {
     // Build a structure from values map into staging buffer.
     void* pStaging = _ubo->handle()->GetCPUStagingAddress();
-    ::memcpy_s(pStaging, uniformBuffer().size(), uniformBuffer().data(), uniformBuffer().size());
+    memcpy(pStaging, uniformBuffer().data(), uniformBuffer().size());
 
     // Transfer staging buffer to GPU.
     pxr::HgiBlitCmdsUniquePtr blitCmds = _pRenderer->hgi()->CreateBlitCmds();

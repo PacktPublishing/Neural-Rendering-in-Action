@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -71,6 +71,9 @@
 #define AU_FILE ""
 #define AU_LINE 0
 #endif
+
+// This is to fix "ISO C++11 requires at least one argument for the "..." in a variadic macro".
+#pragma GCC system_header
 
 /// Triggers an information event, which logs a message along with the current file and line.
 #define AU_INFO(_msg, ...) Aurora::Foundation::Log::info(AU_FILE, AU_LINE, _msg, ##__VA_ARGS__)
@@ -268,9 +271,15 @@ private:
     {
         // Disable the Clang security warning.
         // TODO: Implement a better workaround for this warning.
-#if __clang__
+#if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wformat-security"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-security"
+#elif defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4840) // Non-portable use of class argument to a variadic function
 #endif
         // Calculate the size of the expanded format string.
         const char* formatStr = format.c_str();
@@ -286,8 +295,12 @@ private:
         // Allocate a buffer for the formatted string and place the expanded string in it.
         std::vector<char> buf(size);
         std::snprintf(buf.data(), size, formatStr, args...);
-#if __clang__
+#if defined(__clang__)
 #pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#elif defined(_MSC_VER)
+#pragma warning(pop)
 #endif
 
         // Add a newline if there is not already one at the end, and terminate the string.
@@ -305,7 +318,7 @@ private:
         // Return a new string object from the buffer.
         // TODO: Avoid multiple allocations.
         return std::string(buf.data(), buf.data() + size - 1);
-    };
+    }
 
     // Displays a failure dialog box.
     bool displayFailureDialog(const std::string& file, int line, const std::string& msg);

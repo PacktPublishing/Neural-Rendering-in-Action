@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,7 +38,11 @@ static PropertySetPtr propertySet()
     gpPropertySet->add(kLabelMaxLuminance, 1000.0f);
     gpPropertySet->add(kLabelTraceDepth, 5);
     gpPropertySet->add(kLabelIsToneMappingEnabled, false);
+#if defined(__APPLE__)
+    gpPropertySet->add(kLabelIsGammaCorrectionEnabled, false);
+#else
     gpPropertySet->add(kLabelIsGammaCorrectionEnabled, true);
+#endif
     gpPropertySet->add(kLabelIsAlphaEnabled, false);
     gpPropertySet->add(kLabelBrightness, vec3(1.0f, 1.0f, 1.0f));
     gpPropertySet->add(kLabelUnits, string("centimeter"));
@@ -197,41 +201,20 @@ bool RendererBase::updatePostProcessingGPUStruct(PostProcessing* pStaging)
 
     // Prepare post-processing settings.
     int debugMode                     = _values.asInt(kLabelDebugMode);
+    settings.brightness               = _values.asFloat3(kLabelBrightness);
     settings.debugMode                = glm::max(0, glm::min(debugMode, kMaxDebugMode));
+    settings.range                    = sceneRange;
     settings.isDenoisingEnabled       = _values.asBoolean(kLabelIsDenoisingEnabled) ? 1 : 0;
     settings.isToneMappingEnabled     = _values.asBoolean(kLabelIsToneMappingEnabled);
     settings.isGammaCorrectionEnabled = _values.asBoolean(kLabelIsGammaCorrectionEnabled);
     settings.isAlphaEnabled           = _values.asBoolean(kLabelIsAlphaEnabled);
-    settings.brightness               = _values.asFloat3(kLabelBrightness);
-    settings.range                    = sceneRange;
-
+    
     // If there are no changes compared local CPU copy, then do nothing and return false.
     if (memcmp(&_postProcessingData, &settings, sizeof(PostProcessing)) == 0)
         return false; // No changes.
 
     // Update local CPU copy.
     _postProcessingData = settings;
-
-    // Update staging buffer, if one provided.
-    if (pStaging)
-        *pStaging = settings;
-
-    return true;
-}
-
-bool RendererBase::updateAccumulationGPUStruct(uint32_t sampleIndex, Accumulation* pStaging)
-{
-    Accumulation settings;
-    // Prepare accumulation settings.
-    settings.sampleIndex        = sampleIndex;
-    settings.isDenoisingEnabled = _values.asBoolean(kLabelIsDenoisingEnabled) ? 1 : 0;
-
-    // If there are no changes compared local CPU copy, then do nothing and return false.
-    if (memcmp(&_accumData, &settings, sizeof(PostProcessing)) == 0)
-        return false; // No changes.
-
-    // Update local CPU copy.
-    _accumData = settings;
 
     // Update staging buffer, if one provided.
     if (pStaging)

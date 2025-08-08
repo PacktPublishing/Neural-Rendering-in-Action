@@ -1,4 +1,4 @@
-// Copyright 2022 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,8 +30,11 @@ public:
     const pxr::HgiTextureHandle& texture() { return _texture->handle(); }
     pxr::HgiFormat getHGIFormat(ImageFormat format, bool linearize, uint32_t* pPixelByteSizeOut);
 
+    // Gets the image alias map, if this image represents an environment.
+    const pxr::HgiBufferHandle& aliasMap() { return _pAliasMapBuffer->handle(); }
 private:
     HgiTextureHandleWrapper::Pointer _texture;
+    HgiBufferHandleWrapper::Pointer  _pAliasMapBuffer;
 };
 MAKE_AURORA_PTR(HGIImage);
 

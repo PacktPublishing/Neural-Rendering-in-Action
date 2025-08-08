@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@ public:
 
     TextureProperties(const vector<TextureIdentifier>& names)
     {
-        for (int i = 0; i < names.size(); i++)
+        for (size_t i = 0; i < names.size(); i++)
         {
             auto& name                     = names[i];
             _textureNameLookup[name.image] = int(_properties.size());
@@ -229,6 +229,36 @@ public:
     // Get the uniform buffer for this material.
     UniformBuffer& uniformBuffer() { return _uniformBuffer; }
     const UniformBuffer& uniformBuffer() const { return _uniformBuffer; }
+
+    // Check if the material has a value for the specified name (either uniform buffer or texture)
+    bool hasValue(const string& name) const
+    {
+        return _uniformBuffer.contains(name) || 
+               _textures.findTexture(name) >= 0 || 
+               _textures.findSampler(name) >= 0;
+    }
+
+    // Get an image for the specified texture name
+    IImagePtr asImage(const string& name) const
+    {
+        int idx = _textures.findTexture(name);
+        if (idx >= 0)
+        {
+            return _textures.get(idx).image;
+        }
+        return nullptr;
+    }
+
+    // Get a sampler for the specified sampler name
+    ISamplerPtr asSampler(const string& name) const
+    {
+        int idx = _textures.findSampler(name);
+        if (idx >= 0)
+        {
+            return _textures.get(idx).sampler;
+        }
+        return nullptr;
+    }
 
     // Hard-coded Standard Surface properties, textures and defaults used by built-in materials.
     static UniformBufferDefinition StandardSurfaceUniforms;

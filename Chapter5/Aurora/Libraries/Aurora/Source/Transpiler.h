@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,19 +29,21 @@ public:
     enum Language
     {
         HLSL,
-        GLSL
+        GLSL,
+        Metal
     };
 
-    // Ctot take a map of file text strings.
+    // Constructor take a map of file text strings.
     Transpiler(const std::map<std::string, const std::string&>& fileText);
     ~Transpiler();
 
     // Transpile a file with given name (looked up from map of file text strings)
-    bool transpile(const string& shaderName, string& codeOut, string& errorOut, Language target);
+    bool transpile(const string& shaderName, string& codeOut, string& errorOut, Language target,
+        const map<string, string>& preprocessorDefines = {});
 
     // Transpile a string containing shader code.
-    bool transpileCode(
-        const string& shaderCode, string& codeOut, string& errorOut, Language target);
+    bool transpileCode(const string& shaderCode, string& codeOut, string& errorOut, Language target,
+        const map<string, string>& preprocessorDefines = {});
 
     // Set a source file in the file text string map.
     void setSource(const string& name, const string& code);

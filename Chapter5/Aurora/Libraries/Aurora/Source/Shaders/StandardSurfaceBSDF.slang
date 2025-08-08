@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -846,7 +846,7 @@ BSDF_AND_COSINE evaluateMaterialAndPDF(Material material, ShadingData shading,
     float3 result;
 
     // Sample coat lobe.
-    float coat = ENABLE_COAT ? material.coat : 0.0;
+    float coat = bool(ENABLE_COAT) ? material.coat : 0.0;
 
     // Evaluate the specular Fresnel component for coat BSDF.
     float coatF0 = mx_ior_to_f0(material.coatIOR);
@@ -956,7 +956,7 @@ BSDF_AND_COSINE evaluateMaterialAndPDF(Material material, ShadingData shading,
                 float sheenAlpha = clamp(material.sheenRoughness, M_FLOAT_EPS, 1.0);
 
                 // Sample sheen node.
-                float sheen = ENABLE_SHEEN ? material.sheen : 0.0;
+                float sheen = bool(ENABLE_SHEEN) ? material.sheen : 0.0;
                 if (random.x < material.sheen)
                 {
 #if ENABLE_SHEEN
@@ -1075,7 +1075,7 @@ BSDF_AND_COSINE sampleMaterial(Material material, ShadingData shading, float3 Vw
     float3 result;
 
     // Sample coat lobe.
-    float coat = ENABLE_COAT ? material.coat : 0.0;
+    float coat = bool(ENABLE_COAT) ? material.coat : 0.0;
 
     // Evaluate the specular Fresnel component for coat BSDF.
     float coatF0 = mx_ior_to_f0(material.coatIOR);
@@ -1190,7 +1190,7 @@ BSDF_AND_COSINE sampleMaterial(Material material, ShadingData shading, float3 Vw
                 float sheenAlpha = clamp(material.sheenRoughness, M_FLOAT_EPS, 1.0);
 
                 // Sample sheen node.
-                float sheen = ENABLE_COAT ? material.sheen : 0.0;
+                float sheen = bool(ENABLE_COAT) ? material.sheen : 0.0;
                 if (random.x < material.sheen)
                 {
 #if ENABLE_SHEEN
@@ -1219,7 +1219,7 @@ BSDF_AND_COSINE sampleMaterial(Material material, ShadingData shading, float3 Vw
                 else
                 {
                     random.x           = remapFail(random.x, sheen);
-                    float transmission = ENABLE_TRANSMISSION ? material.transmission : 0.0;
+                    float transmission = bool(ENABLE_TRANSMISSION) ? material.transmission : 0.0;
                     if (random.x < transmission)
                     {
 #if ENABLE_TRANSMISSION

@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,6 +31,35 @@ struct SceneInstanceData
     Aurora::Path geometryPath;
 };
 
+enum ESceneCameraType {
+    SCENE_CAMERA_TYPE_PERSPECTIVE,
+    SCENE_CAMERA_TYPE_ORTHOGRAPHIC
+};
+
+struct ScenePerspectiveCamera {
+    float znear;        // both
+    float zfar;         // both
+    float yfov;         // perspective
+    float aspectRatio;  // perspective
+};
+
+struct SceneOrthographicCamera {
+    float znear;        // both
+    float zfar;         // both
+    float xmag;         // orthographic
+    float ymag;         // orthographic
+};
+
+struct SceneCamera {
+    ESceneCameraType    cameraType;
+    glm::mat4           viewMatrix;
+    std::string         name;
+    union {
+        ScenePerspectiveCamera  perspectiveProperties;
+        SceneOrthographicCamera orthographicProperties;
+    };
+};
+
 // Contents of a loaded scene.
 struct SceneContents
 {
@@ -54,6 +83,9 @@ struct SceneContents
     // The world space bounds of the loaded scene.
     Foundation::BoundingBox bounds;
 
+    // fixed cameras in the scene
+    std::vector<SceneCamera> cameras;
+    
     // Clear the contents all the loaded values instance data.
     void reset();
 };

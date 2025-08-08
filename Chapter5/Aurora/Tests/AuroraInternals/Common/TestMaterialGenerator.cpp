@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -39,6 +39,11 @@ public:
     bool adskMaterialXSupport() { return std::filesystem::exists("MaterialX/libraries/adsk"); }
 
 protected:
+#if defined(__APPLE__)
+    void SetUp() override {
+        GTEST_SKIP() << "Skip all material generator tests on MacOS as MaterialX is not supported yet.";
+    }
+#endif
     std::string _dataPath;
 };
 

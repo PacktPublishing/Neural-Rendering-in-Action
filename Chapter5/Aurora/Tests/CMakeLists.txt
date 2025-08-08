@@ -3,7 +3,10 @@ find_package(glm REQUIRED) # Find the GLM vector maths package.
 find_package(PNG REQUIRED)
 find_package(stb REQUIRED)
 find_package(OpenImageIO REQUIRED)
-find_package(OpenGL REQUIRED)
+find_package(OpenGL REQUIRED) # Find OpenGL library for pxr targets
+if (NOT APPLE)
+    find_package(Vulkan QUIET MODULE COMPONENTS shaderc_combined) # Find Vulkan SDK for pxr targets
+endif()
 find_package(GTest REQUIRED) # Find the GoogleTest unit test package.
 
 find_package(pxr REQUIRED)
@@ -42,6 +45,14 @@ endif()
 # Enable testing in CMake
 enable_testing()
 
+# Include GoogleTest CMake module
+include(GoogleTest)
+if(APPLE)
+    # Xcode delays the signature after the “Run Script” build phase.
+    # So the default POST_BUILD command added by gtest_discover_tests cannot run.
+    # Refer to https://cmake.org/cmake/help/latest/module/GoogleTest.html for more information.
+    set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
+endif()
 # Add variable to locate the test helpers.
 set(TEST_HELPERS_FOLDER ${CMAKE_CURRENT_LIST_DIR}/Helpers)
 

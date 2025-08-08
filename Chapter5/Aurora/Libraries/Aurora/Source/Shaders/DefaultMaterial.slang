@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -64,11 +64,11 @@ float4 sampleOpacityTexture(int mtlOffset, float2 uv, float level)
 #else
 // Vulkan GLSL versions are forward declared and implemented in raw GLSL suffix file.
 MaterialConstants getMaterial();
-float4 sampleBaseColorTexture(float2 uv, float level);
-float4 sampleSpecularRoughnessTexture(float2 uv, float level);
-float4 sampleEmissionColorTexture(float2 uv, float level);
-float4 sampleOpacityTexture(float2 uv, float level);
-float4 sampleNormalTexture(float2 uv, float level);
+float4 sampleBaseColorTexture(int /*mtlOffset*/, float2 uv, float level);
+float4 sampleSpecularRoughnessTexture(int /*mtlOffset*/, float2 uv, float level);
+float4 sampleEmissionColorTexture(int /*mtlOffset*/, float2 uv, float level);
+float4 sampleOpacityTexture(int /*mtlOffset*/, float2 uv, float level);
+float4 sampleNormalTexture(int /*mtlOffset*/, float2 uv, float level);
 #endif
 
 // Normal map spaces definitions.
@@ -122,8 +122,11 @@ float3 calculateNormalFromMap(float3 texelValue, int space, float scale, float3 
 
 // Initializes the full set of property values for a material, for the specified shading data.
 export Material evaluateDefaultMaterial(
-    ShadingData shading, int headerOffset, out float3 materialNormal, out bool isGeneratedNormal)
+    ShadingData shading, int headerOffset, inout float3 materialNormal, out bool isGeneratedNormal)
 {
+#if !DIRECTX
+    MaterialConstants gGlobalMaterialConstants = getMaterial();
+#endif
     int offset = headerOffset + kMaterialHeaderSize;
 
     // Copy the constant values to the material from the constant buffer.
@@ -159,11 +162,11 @@ export Material evaluateDefaultMaterial(
     material.emission = Material_emission(gGlobalMaterialConstants, offset);
     material.emissionColor = Material_emissionColor(gGlobalMaterialConstants, offset);
     material.opacity = Material_opacity(gGlobalMaterialConstants, offset);
-    material.thinWalled = Material_thinWalled(gGlobalMaterialConstants, offset);
+    material.thinWalled = bool(Material_thinWalled(gGlobalMaterialConstants, offset));
 
      // Sample base color from a texture if necessary.
     float4 texCoord = float4(shading.texCoord, 0.0f, 1.0f);
-    if (Material_hasBaseColorTex(gGlobalMaterialConstants, offset))
+    if (bool(Material_hasBaseColorTex(gGlobalMaterialConstants, offset)))
     {
         float2 uv =
             applyUVTransform(shading.texCoord, Material_baseColorTexPivot(gGlobalMaterialConstants, offset),
@@ -174,7 +177,7 @@ export Material evaluateDefaultMaterial(
     }
 
     // Sample specular roughness from a texture if necessary.
-    if (Material_hasSpecularRoughnessTex(gGlobalMaterialConstants, offset))
+    if (bool(Material_hasSpecularRoughnessTex(gGlobalMaterialConstants, offset)))
     {
         float2 uv = applyUVTransform(shading.texCoord,
             Material_specularRoughnessTexPivot(gGlobalMaterialConstants, offset),
@@ -186,7 +189,7 @@ export Material evaluateDefaultMaterial(
     }
 
     // Sample emission color from a texture if necessary.
-    if (Material_hasEmissionColorTex(gGlobalMaterialConstants, offset))
+    if (bool(Material_hasEmissionColorTex(gGlobalMaterialConstants, offset)))
     {
         float2 uv = applyUVTransform(shading.texCoord,
             Material_emissionColorTexPivot(gGlobalMaterialConstants, offset),
@@ -197,7 +200,7 @@ export Material evaluateDefaultMaterial(
     }
 
     // Sample opacity from a texture if necessary.
-    if (Material_hasOpacityTex(gGlobalMaterialConstants, offset))
+    if (bool(Material_hasOpacityTex(gGlobalMaterialConstants, offset)))
     {
         float2 uv = applyUVTransform(shading.texCoord, Material_opacityTexPivot(gGlobalMaterialConstants, offset),
             Material_opacityTexScale(gGlobalMaterialConstants, offset),
@@ -209,7 +212,7 @@ export Material evaluateDefaultMaterial(
     // Sample a normal from the normal texture, convert it to an object-space normal, transform to
     // world space, and store it in the output value.
     isGeneratedNormal = false;
-    if (Material_hasNormalTex(gGlobalMaterialConstants, offset))
+    if (bool(Material_hasNormalTex(gGlobalMaterialConstants, offset)))
     {
         float2 uv = applyUVTransform(shading.texCoord, Material_normalTexPivot(gGlobalMaterialConstants, offset),
             Material_normalTexScale(gGlobalMaterialConstants, offset),

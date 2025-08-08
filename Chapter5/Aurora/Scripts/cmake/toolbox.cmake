@@ -42,10 +42,37 @@ macro(minify_shaders header shader_folder shaders)
     endforeach()
 
     # Add a custom command to create minified shader.
-    add_custom_command(
-        OUTPUT ${header}
-        COMMAND ${Python3_EXECUTABLE} ${SCRIPTS_DIR}/minifyShadersFolder.py ${shader_folder} ${header} ${Slang_COMPILER}
-        COMMENT "Minifying path tracing shaders to ${header}"
-        DEPENDS ${shaders}
-    )
+    if(APPLE OR UNIX)
+        # XXX: Disable slangc on MacOS & Linux for now.
+        add_custom_command(
+            OUTPUT ${header}
+            COMMAND ${Python3_EXECUTABLE} ${SCRIPTS_DIR}/minifyShadersFolder.py ${shader_folder} ${header}
+            COMMENT "Minifying path tracing shaders to ${header}"
+            DEPENDS ${shaders}
+        )
+    else()
+        add_custom_command(
+            OUTPUT ${header}
+            COMMAND  ${CMAKE_COMMAND} -E env "DXC_LIBRARY_DIR=${DXC_LIBRARY_DIR}" ${Python3_EXECUTABLE} ${SCRIPTS_DIR}/minifyShadersFolder.py ${shader_folder} ${header} ${Slang_COMPILER}
+            COMMENT "Minifying path tracing shaders to ${header}"
+            DEPENDS ${shaders}
+        )
+    endif()
+endmacro()
+
+macro(minify_metal_lib header shader_folder shaders)
+    # Set the tool override for the shaders to "NONE", this will mean VS does not attempt to compile them (though they will appear in project.)
+    foreach(shader ${shaders})
+        set_property(SOURCE ${shader} PROPERTY VS_TOOL_OVERRIDE "NONE")
+    endforeach()
+
+    # Add a custom command to create minified shader.
+    if(APPLE)
+        add_custom_command(
+            OUTPUT ${header}
+            COMMAND ${Python3_EXECUTABLE} ${SCRIPTS_DIR}/minifyMetalShaders.py ${shader_folder} ${header}
+            COMMENT "Minifying path tracing shaders to ${header}"
+            DEPENDS ${shaders}
+        )
+    endif()
 endmacro()

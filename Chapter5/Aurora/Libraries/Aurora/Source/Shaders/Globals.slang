@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,9 +28,7 @@
 #define BLACK 0.0f
 #define WHITE 1.0f
 
-// Neither INIFITIY or sizeof supported in Slang
-#define INFINITY 10.0e+99 // Set to larger that largest float32, will get converted to infinity
-#define WORD_SIZE 4
+#define INFINITY +1.#INF
 
 // Returns whether the specified color is black, i.e. all zero components.
 bool isBlack(float3 color)

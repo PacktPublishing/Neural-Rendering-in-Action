@@ -6,31 +6,41 @@ Several prerequisites must be installed before building Aurora.
 
 ### Windows
 On windows the following packages should be installed and added to the system PATH environment variable:
-* [Microsoft Visual Studio 2019](https://my.visualstudio.com/Downloads?q=visual%20studio%202019) or [2022](https://my.visualstudio.com/Downloads?q=visual%20studio%202022).
-* CMake 3.26.11 ([installer](https://github.com/Kitware/CMake/releases/download/v3.26.1/cmake-3.26.1-windows-x86_64.msi)).
-* Python 3.9.13 ([installer](https://www.python.org/downloads/release/python-3913)) and the following Python packages:
-  * PySide6: install with `pip3 install pyside6`.
+* [Microsoft Visual Studio 2022](https://my.visualstudio.com/Downloads?q=visual%20studio%202022).
+* CMake 3.29.3 or later ([installer](https://github.com/Kitware/CMake/releases/download/v3.29.7/cmake-3.29.7-windows-x86_64.msi)).
+* Python 3.11 or later ([installer](https://www.python.org/downloads/release/python-3119/)) and the following Python packages:
+  * PySide6: install with `pip3 install PySide6`.
   * PyOpenGL: install with `pip3 install PyOpenGL`.
+  * Jinja2: install with `pip3 install Jinja2`.
 
 * NASM 2.16 ([installer](https://www.nasm.us/pub/nasm/releasebuilds/2.16.01/win64/nasm-2.16.01-installer-x64.exe)).
-* [Vulkan SDK](https://vulkan.lunarg.com/sdk/home#windows). This should be accessible via the `VULKAN_SDK` environment variable.
+* [Vulkan SDK 1.3.296.0+](https://vulkan.lunarg.com/sdk/home#windows). This should be accessible via the `VULKAN_SDK` environment variable.
+
+### MacOS
+The following tools should be installed and accessible through PATH environment variable:
+* Xcode 15.4 or later.
+  * Xcode Command Line Tools: install by running `xcode-select --install`.
+* Git with LFS: set up by running `git lfs install`.
+* CMake 3.29.3 or later ([installer](https://github.com/Kitware/CMake/releases/download/v3.29.7/cmake-3.29.7-macos-universal.dmg)).
+* Python 3.11 or later
+* Python Certificates: install with '/Applications/Python\ 3.11/Install\ Certificates.command'.
+* Install the following Python packages:
+  * PySide6: install with 'pip3 install PySide6'.
+  * PyOpenGL: install with 'pip3 install PyOpenGL'.
 
 ### Linux
-The following dependencies are required on Linux.  The versions listed are the recommended version for Ubuntu 20.04:
-* zlib1g-dev: 1.2.11
-* libjpeg-turbo8-dev: 2.0.3
-* libtiff-dev: 4.1.0
-* libpng-dev: 1.6.37
-* libglm-dev: 0.9.9.7
-* libglew-dev: 2.1.0
-* libglfw3-dev: 3.3.2
-* libgtest-dev: 1.10.0
-* libgmock-dev: 1.10.0
+On Ubuntu 24.04 or later, the dependencies can be installed with the following Advanced Package Tool command:
+```
+sudo apt-get -y install zlib1g-dev libjpeg-turbo8-dev libtiff-dev libpng-dev libglm-dev libglew-dev libglfw3-dev libgtest-dev libgmock-dev libxt-dev
+```
 
-On Ubuntu 20.04, these can be installed with the following Advanced Package Tool command:
-```
-sudo apt-get -y install zlib1g-dev libjpeg-turbo8-dev libtiff-dev libpng-dev libglm-dev libglew-dev libglfw3-dev libgtest-dev libgmock-dev
-```
+Required tools:
+* Git with LFS.
+* GCC/G++ or Clang.
+* CMake(3.29.3 or later).
+* Python(3.11 or later).
+  * PySide6, PyOpenGL, Jinja2.
+* [VulkanSDK](https://vulkan.lunarg.com/). It should be accessible via the `VULKAN_SDK` environment variable, so you may need to manually install it rather than through a package tool.
 
 ## Building Aurora
 
@@ -53,6 +63,8 @@ Aurora includes a script that retrieves and builds dependencies ("externals") fr
 
    - Use the `--build-variant` option to choose the build configuration of externals. It can be `Debug`, `Release` (default), or `All`.
 
+   - On MacOS, you can specify the build target with `--build-target`. It can be `native`, `x86_64`, `arm64`, or `universal`.
+
    - Use the `-h` option with the script to see available options.
 
 4. **Generating projects:** Run CMake in *AURORA_DIR* to generate build projects, e.g. a Visual Studio solution.
@@ -64,7 +76,7 @@ Aurora includes a script that retrieves and builds dependencies ("externals") fr
    - You can use CMake on the command line or the GUI (cmake-gui). The CMake command to generate projects is as follows:
 
      ```
-     cmake -S . -B {AURORA_BUILD_DIR} -D CMAKE_BUILD_TYPE={CONFIGURATION} -D EXTERNALS_ROOT={EXTERNALS_ROOT}
+     cmake -S . -B {AURORA_BUILD_DIR} -G {GENERATOR} -D CMAKE_BUILD_TYPE={CONFIGURATION} -D EXTERNALS_ROOT={EXTERNALS_ROOT}
      ```
 
      As noted above, the value for `EXTERNALS_ROOT` must be specified as an absolute path.
@@ -73,11 +85,15 @@ Aurora includes a script that retrieves and builds dependencies ("externals") fr
 
    - On Windows, `CMAKE_BUILD_TYPE` is ignored during the cmake configuration. You are required to specify the build configuration with `--config {CONFIGURATION}` during the cmake build.
 
-   - You can optionally specify the desired graphics API backend as described below, e.g. `-D ENABLE_HGI_BACKEND=ON`.
+   - You can optionally specify the desired graphics API backend as described below, e.g. `-D ENABLE_HGI_BACKEND=ON`. Note that Plasma with Vulkan backend does not support interactive mode yet. If more than one backend is enabled, you can designate the desired one, e.g. `--renderer hgi`, when executing Plasma.
+
+   - You can optionally disable Plasma with `-D ENABLE_APPLICATIONS=OFF`, which is enabled by default.
 
    - On Windows, you may need to specify the toolchain and architecture with `-G "Visual Studio 16 2019" -A x64` or `-G "Visual Studio 17 2022" -A x64`.
 
-5. **Building:** You can load the *Aurora.sln* Visual Studio solution file from the Aurora build directory, and build Aurora using the build configuration used with the *installExternals.py* script (see below), or use CMake.
+   - On MacOS, you can specify the toolchain with `-G "Xcode"`. It will also help to generate environment variables, etc. needed by Plasma. **ATTENTION PLEASE: This is now required for Plasma.**
+
+5. **Building:** You can load the *Aurora.sln* Visual Studio solution file (Windows) / *Aurora.xcodeproj* Xcode project file (MacOS) from the Aurora build directory, and build Aurora using the build configuration used with the *installExternals.py* script (see below), or use CMake.
 
    - The CMake command to build Aurora is as follows:
 
@@ -89,16 +105,16 @@ Aurora includes a script that retrieves and builds dependencies ("externals") fr
 
 ## Graphics API Support
 
-As noted in the system requirements, Aurora can use either the [DirectX Raytracing](https://microsoft.github.io/DirectX-Specs/d3d/Raytracing.html) API (Windows only) or the [Vulkan Ray Tracing](https://www.khronos.org/blog/ray-tracing-in-vulkan) API (on Windows or Linux). These are referred to as "backends" in the build process.
+As noted in the system requirements, Aurora can use the [DirectX Raytracing](https://microsoft.github.io/DirectX-Specs/d3d/Raytracing.html) API (Windows only), the [Vulkan Ray Tracing](https://www.khronos.org/blog/ray-tracing-in-vulkan) API (on Windows or Linux), or the [Metal Ray Tracing](https://developer.apple.com/documentation/metal/ray_tracing_with_acceleration_structures?language=objc) API (MacOS only). These are referred to as "backends" in the build process.
 
 On Windows, you can set a flag in the CMake configuration to enable the desired backend(s):
 
 - `-D ENABLE_DIRECTX_BACKEND=[ON/OFF]` for DirectX (default is ON).
 - `-D ENABLE_HGI_BACKEND=[ON/OFF]` for Vulkan (default is OFF).
 
-On Linux,  `ENABLE_HGI_BACKEND` is `ON` and `ENABLE_DIRECTX_BACKEND` is `OFF` and cannot be changed.
+On Linux and MacOS,  `ENABLE_HGI_BACKEND` is `ON` and `ENABLE_DIRECTX_BACKEND` is `OFF` and cannot be changed.
 
-Vulkan support is provided through USD Hydra's "HGI" interface, using a prototype extension for Vulkan ray tracing available in [this branch of the Autodesk fork of USD](https://github.com/autodesk-forks/USD/tree/adsk/feature/hgiraytracing). For this reason, USD is required when compiling Aurora with the Vulkan backend on Windows or Linux. USD is built as part of the build process described above, to support both the HdAurora render delegate and Vulkan.
+Vulkan and Metal support are provided through USD Hydra's "HGI" interface, using a prototype extension for ray tracing available in [this branch of the Autodesk fork of USD](https://github.com/autodesk-forks/USD/tree/adsk/feature/hgiraytracing). For this reason, USD is required when compiling Aurora with the Vulkan or Metal backend. USD is built as part of the build process described above, to support both the HdAurora render delegate and backends.
 
 
 ## Changing Configurations
@@ -106,5 +122,5 @@ Vulkan support is provided through USD Hydra's "HGI" interface, using a prototyp
 By default, Aurora will be built with the *Release* build configuration, i.e. for application deployment and best performance. To change to another configuration, see the information below.
 
 - **For the externals** installed with the *installExternals.py* script, you can specify the desired configuration with the `--build-variant` option, and specify `Debug`, `Release` (default), or `All`. You can have both `Debug` and `Release` configurations built with `All` option. Additional configurations will take longer to install and will consume more disk space.
-- **For Aurora itself**, on Linux, you can specify the desired configuration with the `CMAKE_BUILD_TYPE` variable when running CMake project generation. On Windows, this variable is ignored.
+- **For Aurora itself**, on Linux or MacOS, you can specify the desired configuration with the `CMAKE_BUILD_TYPE` variable when running CMake project generation. On Windows, this variable is ignored.
 - On Windows, it is necessary for Aurora *and* the externals be built with the same configuration. Since Visual Studio allows multiple configurations in a project, you must select the appropriate configuration in the Visual Studio interface, or you will get linker errors. `--build-variant All` is recommended to support both `Debug` and `Release` build configurations.

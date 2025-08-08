@@ -1,4 +1,4 @@
-// Copyright 2024 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -1044,7 +1044,12 @@ enum class AOV
 
     /// The depth of scene geometry in normalized device coordinates (NDC), as determined by the
     /// provided projection matrix.
-    kDepthNDC
+    kDepthNDC,
+    kMotion,
+    kDiffuseAlbedo,
+    kSpecularAlbedo,
+    kNormal,
+    kRoughness
 };
 
 /// A map of AOVs to targets, to indicate which targets should receive which AOVs.
@@ -1162,7 +1167,7 @@ public:
     // TODO: Remove. This has been replaced by GM types.
     virtual void setCamera(const float* view, const float* proj, float focalDistance = 1.0f,
         float lensRadius = 0.0f) = 0;
-
+    
     // Render the current scene.
     virtual void render(uint32_t sampleStart = 0, uint32_t sampleCount = 1) = 0;
 

@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -93,7 +93,9 @@ TEST_P(PathTest, TestPathDefault)
     // If pRenderer is null this renderer type not supported, skip rest of the test.
     if (!pRenderer)
         return;
-
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
     // Create the first image.
     const Path kImagePath0 = nextPath("Image");
     ImageDescriptor imageDesc0;

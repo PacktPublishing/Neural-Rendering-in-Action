@@ -1,4 +1,4 @@
-// Copyright 2022 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,12 +34,59 @@ HGIImage::HGIImage(HGIRenderer* pRenderer, const IImage::InitData& initData)
     imageTexDesc.layerCount     = 1;
     imageTexDesc.mipLevels      = 1;
     imageTexDesc.usage          = HgiTextureUsageBitsShaderRead;
-    imageTexDesc.pixelsByteSize = initData.width * initData.height * pixelSizeBytes;
+    imageTexDesc.pixelsByteSize = static_cast<size_t>(initData.width)
+        * static_cast<size_t>(initData.height) * static_cast<size_t>(pixelSizeBytes);
     imageTexDesc.initialData    = initData.pImageData;
 
     // Create the texture.
     _texture = HgiTextureHandleWrapper::create(
         pRenderer->hgi()->CreateTexture(imageTexDesc), pRenderer->hgi());
+    
+    if(initData.isEnvironment) {
+        // Create Alias Map buffer object.
+        size_t width = initData.width;
+        size_t height = initData.height;
+        
+        HgiBufferDesc aliasMapDataUboDesc;
+        aliasMapDataUboDesc.debugName = "Raytracing alias map global data UBO";
+        aliasMapDataUboDesc.usage     = HgiBufferUsageUniform;
+        aliasMapDataUboDesc.byteSize  = sizeof(AliasMap::Entry) * width * height;
+        _pAliasMapBuffer = HgiBufferHandleWrapper::create(pRenderer->hgi()->CreateBuffer(aliasMapDataUboDesc), pRenderer->hgi());
+        
+        // Create per instance data buffer
+        AliasMap::Entry* aliasMapDta = new AliasMap::Entry[width * height];
+                    
+        // Ensure CPU buffer is big enough for pixels.
+        size_t dataByteSize = width * height * 32;
+        std::vector<uint8_t> _mappedBuffer;
+        _mappedBuffer.resize(dataByteSize);
+        
+        // Setup commands to blit storage buffer contents to CPU buffer.
+        HgiBlitCmdsUniquePtr blitCmdsEnvMap = pRenderer->hgi()->CreateBlitCmds();
+        {
+            HgiTextureGpuToCpuOp copyOpEnvMap;
+            copyOpEnvMap.gpuSourceTexture          = texture();
+            copyOpEnvMap.sourceTexelOffset         = GfVec3i(0);
+            copyOpEnvMap.mipLevel                  = 0;
+            copyOpEnvMap.cpuDestinationBuffer      = _mappedBuffer.data();
+            copyOpEnvMap.destinationByteOffset     = 0;
+            copyOpEnvMap.destinationBufferByteSize = dataByteSize;
+            blitCmdsEnvMap->CopyTextureGpuToCpu(copyOpEnvMap);
+        }
+        pRenderer->hgi()->SubmitCmds(blitCmdsEnvMap.get(), HgiSubmitWaitTypeWaitUntilCompleted);
+        
+        AliasMap::build((const float*)_mappedBuffer.data(), uvec2(width, height), aliasMapDta, sizeof(AliasMap::Entry) * width * height, _luminanceIntegral);
+
+        pxr::HgiBlitCmdsUniquePtr blitCmdsAliasMap = pRenderer->hgi()->CreateBlitCmds();
+        pxr::HgiBufferCpuToGpuOp blitOpAliasMap;
+        blitOpAliasMap.byteSize              = sizeof(AliasMap::Entry)  * width * height;
+        blitOpAliasMap.cpuSourceBuffer       = aliasMapDta;
+        blitOpAliasMap.sourceByteOffset      = 0;
+        blitOpAliasMap.gpuDestinationBuffer  = aliasMap();
+        blitOpAliasMap.destinationByteOffset = 0;
+        blitCmdsAliasMap->CopyBufferCpuToGpu(blitOpAliasMap);
+        pRenderer->hgi()->SubmitCmds(blitCmdsAliasMap.get());
+    }
 }
 
 HgiFormat HGIImage::getHGIFormat(ImageFormat format, bool linearize, uint32_t* pPixelByteSizeOut)

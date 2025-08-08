@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -54,7 +54,7 @@ uint2 textureSize(sampler2D txt, int lod)
     float2 res       = uint2(1, 1);
     float numLevels = 0;
     txt.textureObject.GetDimensions(lod, res.x, res.y, numLevels);
-    return res;
+    return uint2(res);
 }
 
 // Implement GLSL texture function (renamed via define above).

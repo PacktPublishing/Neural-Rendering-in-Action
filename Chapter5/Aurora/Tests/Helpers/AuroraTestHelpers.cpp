@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -178,13 +178,13 @@ Aurora::Path FixtureBase::loadImage(const string& filename, bool linearize)
     Path path           = "TestImage:" + filename + "-linearize=" + to_string(linearize);
 
     // Set up the pixel data callback
-    imageDesc.getData = [this, path, filename](ImageData& dataOut, AllocateBufferFunction alloc) {
+    imageDesc.getData = [path, filename](ImageData& dataOut, AllocateBufferFunction alloc) {
         // Use STB to load image file.
         int width, height, components;
         unsigned char* pReadPixels = stbi_load(filename.c_str(), &width, &height, &components, 0);
         AU_ASSERT(pReadPixels != nullptr, "Failed to load image:%s", filename.c_str());
 
-        size_t numPixels          = static_cast<size_t>(width * height);
+        size_t numPixels          = static_cast<size_t>(width) * static_cast<size_t>(height);
         size_t numBytes           = numPixels * 4;
         unsigned char* pImageData = static_cast<unsigned char*>(alloc(numBytes));
 
@@ -262,18 +262,21 @@ void FixtureBase::testFloat3Value(
         matProps[name] = 123.0f;
         ASSERT_NO_FATAL_FAILURE(scene.setMaterialProperties(material, matProps))
             << " " << __FUNCTION__ << " value:" << name << " " << message;
-        ;
         ASSERT_THAT(lastLogMessage(), ::testing::StartsWith("Type mismatch in UniformBlock"))
             << " " << __FUNCTION__ << " value:" << name << " " << message;
-        ;
     }
     else
     {
-        ASSERT_NO_FATAL_FAILURE(scene.setMaterialProperties(material, matProps))
-            << " " << __FUNCTION__ << " value:" << name << " " << message;
-        ;
-        ASSERT_THAT(lastLogMessage(), ::testing::StartsWith("Type mismatch in UniformBlock"))
-            << " " << __FUNCTION__ << " value:" << name << " " << message;
+#ifdef NDEBUG
+        ASSERT_THROW(
+            scene.setMaterialProperties(material, matProps), TestHelpers::AuroraLoggerException);
+        ASSERT_THAT(lastLogMessage(),
+            ::testing::StartsWith("AU_ASSERT test failed:\nEXPRESSION: find(name) != end"));
+#else
+        EXPECT_DEATH(
+            { scene.setMaterialProperties(material, matProps); },
+            "AU_ASSERT test failed:\nEXPRESSION: find\\(name\\) != end");
+#endif
     }
 }
 
@@ -299,19 +302,21 @@ void FixtureBase::testFloatValue(
         matProps[name] = vec3(1.0f, 2.0f, 3.0f);
         ASSERT_NO_FATAL_FAILURE(scene.setMaterialProperties(material, matProps))
             << " " << __FUNCTION__ << " value:" << name << " " << message;
-        ;
         ASSERT_THAT(lastLogMessage(), ::testing::StartsWith("Type mismatch in UniformBlock"))
             << " " << __FUNCTION__ << " value:" << name << " " << message;
-        ;
     }
     else
     {
-        ASSERT_NO_FATAL_FAILURE(scene.setMaterialProperties(material, matProps))
-            << " " << __FUNCTION__ << " value:" << name << " " << message;
-        ;
-        ASSERT_THAT(lastLogMessage(), ::testing::StartsWith("Type mismatch in UniformBlock"))
-            << " " << __FUNCTION__ << " value:" << name << " " << message;
-        ;
+#ifdef NDEBUG
+        ASSERT_THROW(
+            scene.setMaterialProperties(material, matProps), TestHelpers::AuroraLoggerException);
+        ASSERT_THAT(lastLogMessage(),
+            ::testing::StartsWith("AU_ASSERT test failed:\nEXPRESSION: find(name) != end"));
+#else
+        EXPECT_DEATH(
+            { scene.setMaterialProperties(material, matProps); },
+            "AU_ASSERT test failed:\nEXPRESSION: find\\(name\\) != end");
+#endif
     }
 }
 
@@ -338,18 +343,21 @@ void FixtureBase::testMatrixValue(
         matProps[name] = 42;
         ASSERT_NO_FATAL_FAILURE(scene.setMaterialProperties(material, matProps))
             << " " << __FUNCTION__ << " value:" << name << " " << message;
-        ;
         ASSERT_THAT(lastLogMessage(), ::testing::StartsWith("Type mismatch in UniformBlock"))
             << " " << __FUNCTION__ << " value:" << name << " " << message;
     }
     else
     {
-        ASSERT_NO_FATAL_FAILURE(scene.setMaterialProperties(material, matProps))
-            << " " << __FUNCTION__ << " value:" << name << " " << message;
-        ;
-        ASSERT_THAT(lastLogMessage(), ::testing::StartsWith("Type mismatch in UniformBlock"))
-            << " " << __FUNCTION__ << " value:" << name << " " << message;
-        ;
+#ifdef NDEBUG
+        ASSERT_THROW(
+            scene.setMaterialProperties(material, matProps), TestHelpers::AuroraLoggerException);
+        ASSERT_THAT(lastLogMessage(),
+            ::testing::StartsWith("AU_ASSERT test failed:\nEXPRESSION: find(name) != end"));
+#else
+        EXPECT_DEATH(
+            { scene.setMaterialProperties(material, matProps); },
+            "AU_ASSERT test failed:\nEXPRESSION: find\\(name\\) != end");
+#endif
     }
 }
 
@@ -375,16 +383,21 @@ void FixtureBase::testBooleanValue(
         matProps[name] = vec3(1.0f, 2.0f, 3.0f);
         ASSERT_NO_FATAL_FAILURE(scene.setMaterialProperties(material, matProps))
             << " " << __FUNCTION__ << " value:" << name << " " << message;
-        ;
         ASSERT_THAT(lastLogMessage(), ::testing::StartsWith("Type mismatch in UniformBlock"))
             << " " << __FUNCTION__ << " value:" << name << " " << message;
     }
     else
     {
+#ifdef NDEBUG
         ASSERT_THROW(
             scene.setMaterialProperties(material, matProps), TestHelpers::AuroraLoggerException);
         ASSERT_THAT(lastLogMessage(),
             ::testing::StartsWith("AU_ASSERT test failed:\nEXPRESSION: find(name) != end"));
+#else
+        EXPECT_DEATH(
+            { scene.setMaterialProperties(material, matProps); },
+            "AU_ASSERT test failed:\nEXPRESSION: find\\(name\\) != end");
+#endif
     }
 }
 
@@ -405,18 +418,28 @@ void FixtureBase::testFloat3Option(
         ASSERT_NO_FATAL_FAILURE(renderer.setOptions(options))
             << " " << __FUNCTION__ << " value:" << name << " " << message;
 
-        options[name] = 123.0f;
-
         // Expect an assert if set with wrong type.
+        options[name] = 123.0f;
+#ifdef NDEBUG
         ASSERT_THROW(renderer.setOptions(options), TestHelpers::AuroraLoggerException);
         ASSERT_THAT(lastLogMessage(),
             ::testing::StartsWith("AU_ASSERT test failed:\nEXPRESSION: typesMatch"));
+#else
+        EXPECT_DEATH(
+            { renderer.setOptions(options); }, "AU_ASSERT test failed:\nEXPRESSION: typesMatch");
+#endif
     }
     else
     {
+#ifdef NDEBUG
         ASSERT_THROW(renderer.setOptions(options), TestHelpers::AuroraLoggerException);
         ASSERT_THAT(lastLogMessage(),
             ::testing::StartsWith("AU_ASSERT test failed:\nEXPRESSION: find(name) != end"));
+#else
+        EXPECT_DEATH(
+            { renderer.setOptions(options); },
+            "AU_ASSERT test failed:\nEXPRESSION: find\\(name\\) != end");
+#endif
     }
 }
 
@@ -440,16 +463,26 @@ void FixtureBase::testFloatOption(
         // Expect an assert if set with wrong type.
         vec3 testColor(1.0f, 2.0f, 3.0f);
         options[name] = testColor;
-
+#ifdef NDEBUG
         ASSERT_THROW(renderer.setOptions(options), TestHelpers::AuroraLoggerException);
         ASSERT_THAT(lastLogMessage(),
             ::testing::StartsWith("AU_ASSERT test failed:\nEXPRESSION: typesMatch"));
+#else
+        EXPECT_DEATH(
+            { renderer.setOptions(options); }, "AU_ASSERT test failed:\nEXPRESSION: typesMatch");
+#endif
     }
     else
     {
+#ifdef NDEBUG
         ASSERT_THROW(renderer.setOptions(options), TestHelpers::AuroraLoggerException);
         ASSERT_THAT(lastLogMessage(),
             ::testing::StartsWith("AU_ASSERT test failed:\nEXPRESSION: find(name) != end"));
+#else
+        EXPECT_DEATH(
+            { renderer.setOptions(options); },
+            "AU_ASSERT test failed:\nEXPRESSION: find\\(name\\) != end");
+#endif
     }
 }
 
@@ -472,16 +505,26 @@ void FixtureBase::testBooleanOption(
 
         // Expect an assert if set with wrong type.
         options[name] = vec3(1.0f, 2.0f, 3.0f);
-
+#ifdef NDEBUG
         ASSERT_THROW(renderer.setOptions(options), TestHelpers::AuroraLoggerException);
         ASSERT_THAT(lastLogMessage(),
             ::testing::StartsWith("AU_ASSERT test failed:\nEXPRESSION: typesMatch"));
+#else
+        EXPECT_DEATH(
+            { renderer.setOptions(options); }, "AU_ASSERT test failed:\nEXPRESSION: typesMatch");
+#endif
     }
     else
     {
+#ifdef NDEBUG
         ASSERT_THROW(renderer.setOptions(options), TestHelpers::AuroraLoggerException);
         ASSERT_THAT(lastLogMessage(),
             ::testing::StartsWith("AU_ASSERT test failed:\nEXPRESSION: find(name) != end"));
+#else
+        EXPECT_DEATH(
+            { renderer.setOptions(options); },
+            "AU_ASSERT test failed:\nEXPRESSION: find\\(name\\) != end");
+#endif
     }
 }
 
@@ -505,16 +548,26 @@ void FixtureBase::testIntOption(
         // Expect an assert if set with wrong type.
         vec3 testValue(1.0f, 2.0f, 3.0f);
         options[name] = testValue;
-
+#ifdef NDEBUG
         ASSERT_THROW(renderer.setOptions(options), TestHelpers::AuroraLoggerException);
         ASSERT_THAT(lastLogMessage(),
             ::testing::StartsWith("AU_ASSERT test failed:\nEXPRESSION: typesMatch"));
+#else
+        EXPECT_DEATH(
+            { renderer.setOptions(options); }, "AU_ASSERT test failed:\nEXPRESSION: typesMatch");
+#endif
     }
     else
     {
+#ifdef NDEBUG
         ASSERT_THROW(renderer.setOptions(options), TestHelpers::AuroraLoggerException);
         ASSERT_THAT(lastLogMessage(),
             ::testing::StartsWith("AU_ASSERT test failed:\nEXPRESSION: find(name) != end"));
+#else
+        EXPECT_DEATH(
+            { renderer.setOptions(options); },
+            "AU_ASSERT test failed:\nEXPRESSION: find\\(name\\) != end");
+#endif
     }
 }
 
@@ -567,6 +620,7 @@ IRendererPtr FixtureBase::createDefaultRenderer(int width, int height)
     _projMtx = glm::perspective(glm::radians(45.0f), 1.0f, 0.1f, 1000.0f);
     _viewMtx = glm::lookAt(
         glm::vec3(0.0f, 0.0f, -5.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    
     _pDefaultRenderer->setCamera(glm::value_ptr(_viewMtx), glm::value_ptr(_projMtx));
 
     return _pDefaultRenderer;

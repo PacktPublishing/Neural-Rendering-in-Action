@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -45,7 +45,7 @@ bool isImageSRGB(stbi_uc const* buffer, int len)
     }
 
     // Setup PNG reading structure.
-    stbi__png p;
+    [[maybe_unused]] stbi__png p;
     p.s        = &s;
     p.expanded = nullptr;
     p.idata    = nullptr;
@@ -158,14 +158,40 @@ bool defaultProcessImageFunction(const vector<unsigned char>& buffer, const stri
         pImageOut->data.height    = height;
         pImageOut->data.name      = filename;
         pImageOut->data.linearize = false;
+#if defined(__APPLE__)
+        // only support 4 component float
+        pImageOut->data.format = ImageFormat::Float_RGBA;
+        size_t sizeBytes       = static_cast<size_t>(width) * static_cast<size_t>(height)
+            * static_cast<size_t>(4) * sizeof(float); // components = 4
+#else
         pImageOut->data.format = components == 3 ? ImageFormat::Float_RGB : ImageFormat::Float_RGBA;
-        size_t sizeBytes       = static_cast<size_t>(width * height * components * sizeof(float));
+        size_t sizeBytes       = static_cast<size_t>(width) * static_cast<size_t>(height)
+            * static_cast<size_t>(components) * sizeof(float);
+#endif
         pImageOut->pixels      = make_unique<unsigned char[]>(sizeBytes);
         pImageOut->data.pImageData = pImageOut->pixels.get();
         pImageOut->sizeBytes       = sizeBytes;
 
-        // Copy pixels.
-        memcpy(pImageOut->pixels.get(), pPixels, sizeBytes);
+#if defined(__APPLE__)
+        if(components == 3) {
+            float* dstPixels = reinterpret_cast<float*>(pImageOut->pixels.get());
+            float* srcPixels = reinterpret_cast<float*>(pPixels);
+            
+            const size_t numPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+            for(size_t pixelIdx = 0; pixelIdx < numPixels; ++pixelIdx) {
+                *dstPixels++ = *srcPixels++;
+                *dstPixels++ = *srcPixels++;
+                *dstPixels++ = *srcPixels++;
+                *dstPixels++ = 1.0f;
+            }
+        }
+        else {
+#endif
+            // Copy pixels.
+            memcpy(pImageOut->pixels.get(), pPixels, sizeBytes);
+#if defined(__APPLE__)
+        }
+#endif
 
         // Free the pixels allocated by STB.
         stbi_image_free(pPixels);
@@ -189,7 +215,8 @@ bool defaultProcessImageFunction(const vector<unsigned char>& buffer, const stri
         pImageOut->data.name       = filename;
         pImageOut->data.linearize  = isSRGB;
         pImageOut->data.format     = ImageFormat::Integer_RGBA;
-        size_t sizeBytes           = static_cast<size_t>(width * height * 4);
+        size_t sizeBytes           =
+            static_cast<size_t>(width) * static_cast<size_t>(height) * static_cast<size_t>(4);
         pImageOut->pixels          = make_unique<unsigned char[]>(sizeBytes);
         pImageOut->data.pImageData = pImageOut->pixels.get();
         pImageOut->sizeBytes       = sizeBytes;
@@ -201,7 +228,8 @@ bool defaultProcessImageFunction(const vector<unsigned char>& buffer, const stri
             // the maximum value.
             unsigned char* pIn  = pPixels;
             unsigned char* pOut = pImageOut->pixels.get();
-            for (int i = 0; i < width * height; i++)
+            const size_t imageSize = static_cast<size_t>(width) * static_cast<size_t>(height);
+            for (size_t i = 0; i < imageSize; i++)
             {
                 unsigned char chIn = *(pIn++);
                 *(pOut++)          = chIn;
@@ -215,7 +243,8 @@ bool defaultProcessImageFunction(const vector<unsigned char>& buffer, const stri
             // RGB image: set alpha to the maximum value.
             unsigned char* pIn  = pPixels;
             unsigned char* pOut = pImageOut->pixels.get();
-            for (int i = 0; i < width * height; i++)
+            const size_t imageSize = static_cast<size_t>(width) * static_cast<size_t>(height);
+            for (size_t i = 0; i < imageSize; i++)
             {
                 *(pOut++) = *(pIn++);
                 *(pOut++) = *(pIn++);

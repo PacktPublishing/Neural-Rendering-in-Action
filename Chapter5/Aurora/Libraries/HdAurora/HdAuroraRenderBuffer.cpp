@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -59,7 +59,11 @@ public:
     /// Returns the OpenGL id / name of the texture.
     uint32_t GetTextureId() const { return _textureId; }
 
+#if PXR_VERSION <= 2505
     void SubmitLayoutChange(HgiTextureUsage /*newLayout*/) override { return; }
+#else
+    HgiTextureUsage SubmitLayoutChange(HgiTextureUsage /*newLayout*/) override { return 0; }
+#endif
 
 private:
     HgiHdAuroraTextureGL()                                       = delete;
@@ -212,7 +216,11 @@ public:
 
     uint64_t GetRawResource() const override { return reinterpret_cast<uint64_t>(_sharedDXHandle); }
 
+#if PXR_VERSION <= 2505
     void SubmitLayoutChange(HgiTextureUsage /*newLayout*/) override { return; }
+#else
+    HgiTextureUsage SubmitLayoutChange(HgiTextureUsage /*newLayout*/) override { return 0; }
+#endif
 
 private:
     HgiHdAuroraTextureDX()                                       = delete;

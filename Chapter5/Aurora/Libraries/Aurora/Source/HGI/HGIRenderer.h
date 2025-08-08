@@ -1,4 +1,4 @@
-// Copyright 2022 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -69,6 +69,7 @@ public:
 
     const std::vector<std::string>& builtInMaterials() override;
     pxr::HgiUniquePtr& hgi() { return _hgi; }
+    const pxr::HgiUniquePtr& hgi() const { return _hgi; }
     const pxr::HgiBufferHandle& frameDataUbo() { return _frameDataUbo->handle(); }
     const pxr::HgiBufferHandle& sampleDataUbo() { return _sampleDataUbo->handle(); }
 
@@ -78,6 +79,16 @@ public:
 
     pxr::HgiTextureHandle directTex() { return _pDirectTex->handle(); }
     pxr::HgiTextureHandle accumulationTex() { return _pAccumulationTex->handle(); }
+    enum AOV_NAMES {
+        AOV_DEPTH,
+        AOV_MOTION,
+        AOV_DIFFUSE,
+        AOV_SPECULAR,
+        AOV_NORMAL,
+        AOV_ROUGHNESS,
+        AOV_LIST_SIZE
+    };
+    HGIRenderBuffer* AOVRenderBuffer(size_t index) { return _lstAOVRenderBuffer[index]; };
 
     pxr::HgiSamplerHandle sampler() { return _sampler->handle(); }
 
@@ -100,6 +111,7 @@ private:
     HgiSamplerHandleWrapper::Pointer _sampler;
     HgiTextureHandleWrapper::Pointer _pDirectTex;
     HgiTextureHandleWrapper::Pointer _pAccumulationTex;
+    HGIRenderBuffer*                 _lstAOVRenderBuffer[AOV_LIST_SIZE];
 
     MaterialShaderLibrary _shaderLibrary;
     shared_ptr<MaterialDefinition> _pDefaultMaterialDefinition;

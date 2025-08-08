@@ -1,12 +1,16 @@
+// Copyright 2025 Autodesk, Inc.
 //
-// Copyright 2023 by Autodesk, Inc.  All rights reserved.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// This computer source code and related instructions and comments
-// are the unpublished confidential and proprietary information of
-// Autodesk, Inc. and are protected under applicable copyright and
-// trade secret law.  They may not be disclosed to, copied or used
-// by any third party without the prior written consent of Autodesk, Inc.
+// http://www.apache.org/licenses/LICENSE-2.0
 //
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 #include "pch.h"
 
 #include <fstream>
@@ -48,7 +52,11 @@ public:
     {
         // Hard coded GLSL syntax.
         // TODO: Investigate creating a HlslSyntax class.
+#if MATERIALX_MAJOR_VERSION == 1 && MATERIALX_MINOR_VERSION <= 38
         _pSyntax = make_shared<MaterialX::GlslSyntax>();
+#else
+        _pSyntax = make_shared<MaterialX::GlslSyntax>(MaterialX::TypeSystem::create());
+#endif
 
         // A dummy "pixel" stage is used to generate the BSDF code.
         _pStage = make_shared<MaterialX::ShaderStage>(MaterialX::Stage::PIXEL, _pSyntax);
@@ -61,17 +69,21 @@ public:
 
         // Add the required vertex attributes.
         // TODO: These are just educated guesses. How do we work out which attributes are used?
-        auto tc0 = vd->add(MaterialX::TypeDesc::get("vector2"), MaterialX::HW::T_TEXCOORD + "_0");
+        auto tc0 = vd->add(MaterialX::Type::VECTOR2, MaterialX::HW::T_TEXCOORD + "_0");
         tc0->setVariable("texCoord");
-        auto no = vd->add(MaterialX::TypeDesc::get("vector3"), MaterialX::HW::T_NORMAL_OBJECT);
+        auto no = vd->add(MaterialX::Type::VECTOR3, MaterialX::HW::T_NORMAL_OBJECT);
         no->setVariable("objectNormal");
-        auto nw = vd->add(MaterialX::TypeDesc::get("vector3"), MaterialX::HW::T_NORMAL_WORLD);
+        auto nw = vd->add(MaterialX::Type::VECTOR3, MaterialX::HW::T_NORMAL_WORLD);
         nw->setVariable("normal");
-        auto tw = vd->add(MaterialX::TypeDesc::get("vector3"), MaterialX::HW::T_TANGENT_WORLD);
+        auto tw = vd->add(MaterialX::Type::VECTOR3, MaterialX::HW::T_TANGENT_WORLD);
         tw->setVariable("tangent");
-        auto po = vd->add(MaterialX::TypeDesc::get("vector3"), MaterialX::HW::T_POSITION_OBJECT);
+#if MATERIALX_MAJOR_VERSION >= 1 && MATERIALX_MINOR_VERSION >= 39
+        auto bw = vd->add(MaterialX::Type::VECTOR3, MaterialX::HW::T_BITANGENT_WORLD);
+        bw->setVariable("bitangentWorld");
+#endif
+        auto po = vd->add(MaterialX::Type::VECTOR3, MaterialX::HW::T_POSITION_OBJECT);
         po->setVariable("objectPosition");
-        auto pw = vd->add(MaterialX::TypeDesc::get("vector3"), MaterialX::HW::T_POSITION_WORLD);
+        auto pw = vd->add(MaterialX::Type::VECTOR3, MaterialX::HW::T_POSITION_WORLD);
         pw->setVariable("position");
     }
 
@@ -100,7 +112,11 @@ private:
 class BSDFShaderGenerator : public MaterialX::GlslShaderGenerator
 {
 public:
-    BSDFShaderGenerator(const string& mtlxLibPath) : _mtlxLibPath(mtlxLibPath)
+    BSDFShaderGenerator(const string& mtlxLibPath) :
+#if MATERIALX_MAJOR_VERSION >= 1 && MATERIALX_MINOR_VERSION > 38
+        MaterialX::GlslShaderGenerator(MaterialX::TypeSystem::create()),
+#endif
+        _mtlxLibPath(mtlxLibPath)
     {
         _pGeneratedIncludes    = make_unique<map<string, string>>();
         _pGeneratedDefinitions = make_unique<map<size_t, string>>();
@@ -518,7 +534,7 @@ void BSDFCodeGenerator::processInput(MaterialX::ShaderInput* input,
                 " \n");
 
             vector<string> outputVars;
-            for (int i = 0; i < inputs.size(); i++)
+            for (size_t i = 0; i < inputs.size(); i++)
             {
                 // Get the input name and connection name it is coming from..
                 auto nodeInput = inputs[i];
@@ -536,7 +552,7 @@ void BSDFCodeGenerator::processInput(MaterialX::ShaderInput* input,
             }
 
             // Recursively process inputs.
-            for (int i = 0; i < inputs.size(); i++)
+            for (size_t i = 0; i < inputs.size(); i++)
             {
                 auto nodeInput = inputs[i];
                 processInput(nodeInput, pBSDFGenShader, outputVars[i], pSourceOut);
@@ -643,7 +659,7 @@ int BSDFCodeGenerator::generateDefinitions(string* pResultOut)
 {
     // Combine the GLSL code stored in the definitions vector.
     *pResultOut = "";
-    for (int i = 0; i < _definitions.size(); i++)
+    for (size_t i = 0; i < _definitions.size(); i++)
     {
         pResultOut->append(_definitions[i]);
     }
@@ -1013,6 +1029,7 @@ bool BSDFCodeGenerator::generate(const string& document, BSDFCodeGenerator::Resu
 
     // Find renderable nodes.
     vector<MaterialX::TypedElementPtr> elements;
+#if MATERIALX_MAJOR_VERSION == 1 && MATERIALX_MINOR_VERSION <= 38
     unordered_set<MaterialX::ElementPtr> processedOutputs;
     // TODO: This was deprecated in between MaterialX 1.38.7 and 1.38.8.  Work out the reasons for
     // this and move to new API.
@@ -1020,8 +1037,17 @@ bool BSDFCodeGenerator::generate(const string& document, BSDFCodeGenerator::Resu
     // https://github.com/AcademySoftwareFoundation/MaterialX/commit/f49359877ea41e7fc8ced47d3334e1d608b35a1a
 #pragma warning(push)
 #pragma warning(disable : 4996)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     MaterialX::findRenderableMaterialNodes(mtlxDocument, elements, false, processedOutputs);
+#pragma GCC diagnostic pop
+#pragma clang diagnostic pop
 #pragma warning(pop)
+#else
+    elements = MaterialX::findRenderableMaterialNodes(mtlxDocument);
+#endif
 
     // Return false if no renderable nodes.
     // TODO: Better error handling.
@@ -1045,7 +1071,7 @@ bool BSDFCodeGenerator::generate(const string& document, BSDFCodeGenerator::Resu
 
     // Find the material node using name from element.
     MaterialX::NodePtr materialNode = nullptr;
-    for (int i = 0; i < materialNodes.size(); i++)
+    for (size_t i = 0; i < materialNodes.size(); i++)
     {
         if (materialNodes[i]->getName() == materialNodeName)
         {
@@ -1152,7 +1178,7 @@ bool BSDFCodeGenerator::generate(const string& document, BSDFCodeGenerator::Resu
     // Build the body of the setup function from the surface shader node inputs.
     string functionBody      = "";
     auto surfaceShaderInputs = surfaceShaderNode->getInputs();
-    for (int ssi = 0; ssi < surfaceShaderInputs.size(); ssi++)
+    for (size_t ssi = 0; ssi < surfaceShaderInputs.size(); ssi++)
     {
         // Is this shader input one of the outputs we are interested in ?
         auto surfaceShaderInput = surfaceShaderInputs[ssi];
@@ -1182,14 +1208,14 @@ bool BSDFCodeGenerator::generate(const string& document, BSDFCodeGenerator::Resu
 
     // Set the texture names in the result.
     pResultOut->textures.clear();
-    for (int i = 0; i < pResultOut->textureDefaults.size(); i++)
+    for (size_t i = 0; i < pResultOut->textureDefaults.size(); i++)
     {
         pResultOut->textures.push_back(pResultOut->textureDefaults[i].name);
     }
 
     // Create the contents of the material struct.
     string structProperties;
-    for (int i = 0; i < pResultOut->materialProperties.size(); i++)
+    for (size_t i = 0; i < pResultOut->materialProperties.size(); i++)
     {
         string glslType = getGLSLStringFromType(pResultOut->materialProperties[i].type);
 
@@ -1224,13 +1250,13 @@ bool BSDFCodeGenerator::generate(const string& document, BSDFCodeGenerator::Resu
     pResultOut->materialSetupCode = "void " + pResultOut->setupFunctionName + "(\n";
 
     // Keep track of total input and output parameter count.
-    int numParams = 0;
+    [[maybe_unused]] int numParams = 0;
 
     // The first argument is always the material struct.
     pResultOut->materialSetupCode.append("\t" + pResultOut->materialStructName + " material");
 
     // Add the texture inputs to the function prototype.
-    for (int i = 0; i < _textures.size(); i++)
+    for (size_t i = 0; i < _textures.size(); i++)
     {
         pResultOut->materialSetupCode.append(",\n");
 

@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -93,6 +93,8 @@ BSDF_AND_COSINE evaluateMaterialAndPDF(Material material, ShadingData shading, f
     // NOTE: Vectors in opposite hemispheres should result in evaluating transmission (BTDF).
     if (!sameHemisphere(V, L))
     {
+        pdf    = 0.0;
+        lobeID = -1;
         return BLACK;
     }
 

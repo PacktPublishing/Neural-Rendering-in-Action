@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,8 +20,6 @@
 #include "RayTrace.slang"
 #include "GlobalPipelineState.slang"
 
-// TODO: Re-enable ground plane.
-
 // Shades a matte reflection effect with the specified properties.
 int setupMatteReflectionIndirectLightRay(float opacity, float3 color, float roughness, float3 rayDir, float3 normal,
     float3 tangent, float3 bitangent, float3 position, uint maxDepth, inout Random rng, out float3 indirectRayDirec, out float3 indirectRayOrigin, out float3 indirectColorOut)
@@ -39,6 +37,9 @@ int setupMatteReflectionIndirectLightRay(float opacity, float3 color, float roug
     bsdfAndCosine *= abs(L.z);
     if (isBlack(bsdfAndCosine))
     {
+        indirectRayDirec = float3(.0f);
+        indirectRayOrigin = float3(.0f);
+        indirectColorOut = WHITE;
         return NO_SECONDARY_RAY;
     }
 
@@ -144,6 +145,8 @@ int setupGroundPlaneRay(float3 hitPosition, GroundPlane groundPlane, RaytracingA
     float reflectionOpacity = groundPlane.reflectionOpacity;
     float3 reflectionColor = groundPlane.reflectionColor;
     float reflectionRoughness = groundPlane.reflectionRoughness;
+    groundPlaneRayDirecOut = float3(0.f);
+    groundPlaneRayOriginOut = float3(0.f);
    
     // Shade with a matte reflection layer, if enabled.
     groundPlaneColorOut = WHITE;

@@ -1,4 +1,4 @@
-// Copyright 2022 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,16 +23,34 @@ using namespace pxr;
 BEGIN_AURORA
 
 HGIRenderBuffer::HGIRenderBuffer(
-    HGIRenderer* pRenderer, uint32_t width, uint32_t height, ImageFormat /*format*/) :
+    HGIRenderer* pRenderer, uint32_t width, uint32_t height, ImageFormat format) :
     _pRenderer(pRenderer), _width(width), _height(height)
 {
-    // All render buffers are RGBA8 unorm.
-    HgiFormat hgiFormat = HgiFormat::HgiFormatUNorm8Vec4;
-
+    switch(format) {
+        case ImageFormat::Integer_RGBA: {
+            _format = HgiFormat::HgiFormatUNorm8Vec4;
+            break;
+        }
+        case ImageFormat::Half_RGBA: {
+            _format = HgiFormat::HgiFormatFloat16Vec4;
+            break;
+        }
+        case ImageFormat::Float_RGBA: {
+            _format = HgiFormat::HgiFormatFloat32Vec4;
+            break;
+        }
+        default: {
+            // worst case default to rgba888
+            _format = HgiFormat::HgiFormatUNorm8Vec4;
+            assert(false);
+            break;
+        }
+    }
+    
     // Create descriptor for render buffer storage texture.
     HgiTextureDesc rtStorageTexDesc;
     rtStorageTexDesc.debugName  = "RT Storage Texture";
-    rtStorageTexDesc.format     = hgiFormat;
+    rtStorageTexDesc.format     = _format;
     rtStorageTexDesc.dimensions = GfVec3i(width, height, 1);
     rtStorageTexDesc.layerCount = 1;
     rtStorageTexDesc.mipLevels  = 1;
@@ -43,16 +61,39 @@ HGIRenderBuffer::HGIRenderBuffer(
         _pRenderer->hgi()->CreateTexture(rtStorageTexDesc), _pRenderer->hgi());
 }
 
-void HGIRenderBuffer::resize(uint32_t /*width*/, uint32_t /*height*/) {}
+void HGIRenderBuffer::resize(uint32_t /*width*/, uint32_t /*height*/) {
+    // TODO: Implement me!
+}
 
 const void* HGIRenderBuffer::data(size_t& stride, bool /*removePadding*/)
 {
+    size_t pixelSizeBytes = 0;
+    switch(_format) {
+        case HgiFormat::HgiFormatUNorm8Vec4: {
+            pixelSizeBytes = 4;
+            break;
+        }
+        case HgiFormat::HgiFormatFloat16Vec4: {
+            pixelSizeBytes = 2 * 4;
+            break;
+        }
+        case HgiFormat::HgiFormatFloat32Vec4: {
+            pixelSizeBytes = 4 * 4;
+            break;
+        }
+        default: {
+            // worst case default to rgba888
+            pixelSizeBytes = 4;
+            assert(false);
+            break;
+        }
+    }
+
     // Stride is always just width*pixel-size.  No row padding.
-    size_t pixelSizeBytes = 4;
     stride                = _width * pixelSizeBytes;
 
     // Ensure CPU buffer is big enough for pixels.
-    size_t dataByteSize = _width * _height * 4;
+    size_t dataByteSize = _width * _height * pixelSizeBytes;
     _mappedBuffer.resize(dataByteSize);
 
     // Setup commands to blit storage buffer contents to CPU buffer.

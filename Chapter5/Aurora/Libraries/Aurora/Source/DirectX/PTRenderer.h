@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -114,6 +114,13 @@ public:
     PTGroundPlanePtr defaultGroundPlane();
 
 private:
+    // Accumulation settings GPU data.
+    struct Accumulation
+    {
+        unsigned int sampleIndex;
+        unsigned int isDenoisingEnabled;
+    };
+
     /*** Private Types ***/
     static const size_t _FRAME_DATA_SIZE =
         ALIGNED_SIZE(sizeof(FrameData), D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
@@ -132,6 +139,7 @@ private:
     void updateSceneResources();
     void updateOutputResources();
     void updateDenoisingResources();
+    bool updateAccumulationGPUStruct(uint32_t sampleIndex, Accumulation* pStaging = nullptr);
     void prepareRayDispatch(D3D12_DISPATCH_RAYS_DESC& dispatchRaysDesc);
     void submitRayDispatch(const D3D12_DISPATCH_RAYS_DESC& dispatchRaysDesc, uint32_t sampleIndex,
         uint32_t seedOffset);
@@ -158,6 +166,7 @@ private:
     bool _isDescriptorHeapChanged = true;
     PTSamplerPtr _pDefaultSampler;
     PTGroundPlanePtr _pDefaultGroundPlane;
+    Accumulation _accumData;
 
     /*** DirectX 12 Objects ***/
 

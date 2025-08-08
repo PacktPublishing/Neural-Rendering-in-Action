@@ -3,7 +3,11 @@ project(ImageProcessingResolver)
 
 # Add dependent packages.
 find_package(glm REQUIRED) # Find the GLM vector maths package.
-find_package(stb REQUIRED) # Find the Universal Scene Description (USD) library
+find_package(stb REQUIRED) # Find the stb image library
+find_package(OpenGL QUIET) # Find OpenGL library for pxr targets
+if (NOT APPLE)
+    find_package(Vulkan QUIET MODULE COMPONENTS shaderc_combined) # Find Vulkan SDK for pxr targets
+endif()
 find_package(pxr REQUIRED) # Find the Universal Scene Description (USD) library
 find_package(OpenImageIO REQUIRED)
 find_package(miniz REQUIRED)
@@ -54,10 +58,10 @@ PRIVATE
     glm::glm
     stb::stb
     OpenImageIO::OpenImageIO
-    pxr::usd
-    pxr::hf
-    pxr::hd
-    pxr::hdx
+    usd
+    hf
+    hd
+    hdx
     Foundation
     ${PYTHON_DEPENDENCY}
     Aurora
@@ -73,15 +77,29 @@ PRIVATE
 # Add default compile definitions (set in root CMakefile)
 target_compile_definitions(${PROJECT_NAME} PRIVATE ${DEFAULT_COMPILE_DEFINITIONS})
 
+# Config the plug information file.
+if(WIN32)
+    set(PLUG_INFO_LIBRARY_NAME "imageProcessingResolver.dll")
+elseif(APPLE)
+    set(PLUG_INFO_LIBRARY_NAME "libimageProcessingResolver.dylib")
+else()
+    set(PLUG_INFO_LIBRARY_NAME "libimageProcessingResolver.so")
+endif()
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources/plugInfo.json.in"
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources/plugInfo.json"
+    @ONLY
+)
+
 if(WIN32)
     # Create post-build step to copy to USD folder.
     set(IMAGEPROCESSINGRESOLVER_PLUGIN_RESOURCES_DIR ${CMAKE_CURRENT_SOURCE_DIR}/resources)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:${PROJECT_NAME}> $<$<CONFIG:Debug>:$<TARGET_PDB_FILE:${PROJECT_NAME}>> ${RUNTIME_OUTPUT_DIR}/usd
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${IMAGEPROCESSINGRESOLVER_PLUGIN_RESOURCES_DIR} ${RUNTIME_OUTPUT_DIR}/usd/imageProcessingResolver/resources
+        COMMAND ${CMAKE_COMMAND} -E copy ${IMAGEPROCESSINGRESOLVER_PLUGIN_RESOURCES_DIR}/plugInfo.json ${RUNTIME_OUTPUT_DIR}/usd/imageProcessingResolver/resources/plugInfo.json
     )
 endif()
 
 # Install the binaries.
-install(TARGETS ${PROJECT_NAME}  DESTINATION ${INSTALL_BIN}/usd)
+install(TARGETS ${PROJECT_NAME} DESTINATION ${INSTALL_BIN}/usd)
 install(FILES "resources/plugInfo.json" DESTINATION ${INSTALL_BIN}/usd/imageProcessingResolver/resources)

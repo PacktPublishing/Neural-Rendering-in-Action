@@ -6,9 +6,9 @@
 
 ## System Requirements
 
-Plasma has the same [system requirements](../README.md) as Aurora. In particular, a GPU with support for DirectX Raytracing or Vulkan Ray Tracing is required.
+Plasma has the same [system requirements](../README.md) as Aurora. In particular, a GPU with support for DirectX Raytracing, Vulkan Ray Tracing or MetalRT is required.
 
-At this time, interactive use of Plasma is only supported on Windows. For Linux, command-line single image rendering is available as described below, and interactive support is coming soon.
+At this time, interactive use of Plasma is only supported on Windows and MacOS. For Linux, command-line single image rendering is available as described below, and interactive support is coming soon.
 
 ## Using Plasma
 
@@ -18,6 +18,7 @@ At this time, interactive use of Plasma is only supported on Windows. For Linux,
 | Load an environment image (HDR format)              | CTRL-E key *OR*<br />Drag and drop                           |
 | Load a MaterialX document (.mltx)                   | CTRL-M key: Applies to all loaded objects<br />M: Reload the previous document<br />R key: Reset materials to original |
 | Save screenshot as PNG (to last accessed directory) | S key                                                        |
+| Save screenshot as HDR (to last accessed directory) | H key                                                        |
 | Set to Full Screen                                  | F11 key                                                      |
 | Toggle v-sync                                       | V key                                                        |
 | Toggle animation                                    | Space key                                                    |

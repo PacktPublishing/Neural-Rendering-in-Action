@@ -51,6 +51,7 @@ void main(void)
     vec2 texCoords = GetTexCoords(outCoords);
     vec3 color       = HgiTextureLod_accumulationTexture(texCoords, 0.0).rgb;
 
+
     // Apply brightness.
     color *= gSettings.brightness;
 

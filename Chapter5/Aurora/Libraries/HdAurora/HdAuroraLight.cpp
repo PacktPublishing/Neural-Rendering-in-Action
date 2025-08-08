@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,9 @@
 #include <stdexcept>
 
 #pragma warning(disable : 4506) // inline function warning (from USD but appears in this file)
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized" // "maybe-uninitialized" error from VtValue
+#endif
 
 HdAuroraDomeLight::HdAuroraDomeLight(
     SdfPath const& rprimId, HdAuroraRenderDelegate* renderDelegate) :

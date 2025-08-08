@@ -17,7 +17,7 @@ if(USD_usdviewq_LIBRARY_RELEASE OR USD_usdviewq_LIBRARY_DEBUG)
 endif()
 
 # Set the project name and project variables
-project(Aurora VERSION 24.08.0.0)
+project(Aurora VERSION 25.08.0.0)
 
 # Create a folder for the version header files
 set(VERSION_FOLDER "${PROJECT_BINARY_DIR}/VersionFiles")
@@ -60,9 +60,20 @@ list(APPEND CMAKE_MODULE_PATH
     "${SCRIPTS_DIR}/cmake/modules"
 )
 
-option(ENABLE_TESTS "Build unit tests" ON)
+# XXX: Aurora does not support USDView on MacOS for now.
+if(APPLE)
+    set(ENABLE_USDVIEW OFF)
+else()
+    option(ENABLE_USDVIEW "Build usdview with python" ON)
+endif()
+
+# XXX: Temporarily disable unit tests for Linux.
+if(WIN32 OR APPLE)
+    option(ENABLE_TESTS "Build unit tests" ON)
+else()
+    set(ENABLE_TESTS OFF)
+endif()
 option(ENABLE_APPLICATIONS "Build Applications" ON)
-option(ENABLE_USDVIEW "Build usdview with python" ON)
 
 # Import the cmake utility functions
 include(toolbox)
@@ -92,9 +103,11 @@ if(MSVC)
     add_compile_options(/MP)
     # Add INSTALL project to solution by default.
     set(CMAKE_VS_INCLUDE_INSTALL_TO_DEFAULT_BUILD 1)
-else()
+elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # Enables strict standard conformance and warning as errors
     add_compile_options(-Wall -Wextra -Wpedantic -Werror -Wno-unknown-pragmas -Wno-gnu-zero-variadic-macro-arguments)
+else() # GCC/G++
+    add_compile_options(-Wall -Wextra -Wpedantic -Werror -Wno-unknown-pragmas -Wno-format-security -Wno-deprecated -Wno-class-memaccess -Wno-strict-aliasing)
 endif()
 
 include(externalsConfig OPTIONAL RESULT_VARIABLE EXTERNALS_CONFIG)
@@ -126,5 +139,10 @@ if (ENABLE_TESTS)
 endif()
 
 if (ENABLE_APPLICATIONS)
+    # TODO: Enable language OBJXXX & METAL on MacOS so that Plasma can be built without Xcode.
+    # A possible solution is to include: https://github.com/dpogue/CMake-MetalShaderSupport.
+    if (APPLE AND NOT XCODE)
+        message(FATAL_ERROR "Plasma is not supported on MacOS without Xcode.")
+    endif()
     add_subdirectory(Applications)
 endif()

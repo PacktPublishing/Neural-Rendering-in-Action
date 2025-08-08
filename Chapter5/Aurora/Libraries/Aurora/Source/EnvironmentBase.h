@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -43,9 +43,15 @@ protected:
         vec3 backgroundBottom;
         float _padding4;
         mat4 backgroundTransform;
+#if defined(__APPLE__)
+        bool backgroundUseScreen;
+        bool hasLightTex;
+        bool hasBackgroundTex;
+#else
         int backgroundUseScreen;
         int hasLightTex;
         int hasBackgroundTex;
+#endif
     };
 
     void updateGPUStruct(EnvironmentData& data);

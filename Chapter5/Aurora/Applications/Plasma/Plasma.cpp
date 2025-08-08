@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,14 +19,25 @@
 
 // A global pointer to the application object, for the static WndProc function.
 Plasma* gpApp = nullptr;
+int gArgc = 0;
+const char** gpArgv= nullptr;
+
 #if defined(INTERACTIVE_PLASMA)
 static const char* kAppName = "Plasma";
+
+//#define REPORT_PERF_TO_TTY (1)
+
 #endif
 // The maximum number of samples to render when converging.
 constexpr uint32_t kMaxSamples       = 1000;
 constexpr uint32_t kDenoisingSamples = 50;
 
-#if defined(INTERACTIVE_PLASMA)
+// Screenshot format string
+constexpr uint32_t kMaxScreenshots   = 1000;
+const string       kScreenshotFormat = "capture_%.3u.png";
+const string       kScreenshotHdrFormat = "capture_%.3u.hdr";
+
+#if defined(INTERACTIVE_PLASMA) &&defined(WIN32)
 // Application constructor.
 Plasma::Plasma(HINSTANCE hInstance, unsigned int width, unsigned int height)
 {
@@ -43,6 +54,8 @@ Plasma::Plasma(HINSTANCE hInstance, unsigned int width, unsigned int height)
     _loadFileFunctions[".hdr"]  = bind(&Plasma::loadEnvironmentImageFile, this, placeholders::_1);
     _loadFileFunctions[".mtlx"] = bind(&Plasma::applyMaterialXFile, this, placeholders::_1);
     _loadFileFunctions[".obj"]  = bind(&Plasma::loadSceneFile, this, placeholders::_1);
+    _loadFileFunctions[".gltf"]  = bind(&Plasma::loadSceneFile, this, placeholders::_1);
+    _loadFileFunctions[".glb"]  = bind(&Plasma::loadSceneFile, this, placeholders::_1);
 
     // Set a status update function on the performance monitor.
     _performanceMonitor.setStatusFunction([this](const string& message) {
@@ -54,7 +67,10 @@ Plasma::Plasma(HINSTANCE hInstance, unsigned int width, unsigned int height)
         {
             report << "  |  " << _sceneContents.vertexCount << " vertices / "
                    << _sceneContents.triangleCount << " triangles / "
-                   << _sceneContents.instances.size() << " instance(s)";
+                   << _sceneContents.instances.size() << " instance(s) / "
+                   << _sceneCamera << " of " << _sceneContents.cameras.size() << " camera(s) - "
+                   << ((_sceneCamera == 0) ? "freecam"
+                                           : _sceneContents.cameras[_sceneCamera - 1].name);
         }
 
         // Add the status report from the performance monitor.
@@ -80,6 +96,8 @@ Plasma::Plasma(unsigned int width, unsigned int height)
     _loadFileFunctions[".hdr"]  = bind(&Plasma::loadEnvironmentImageFile, this, placeholders::_1);
     _loadFileFunctions[".mtlx"] = bind(&Plasma::applyMaterialXFile, this, placeholders::_1);
     _loadFileFunctions[".obj"]  = bind(&Plasma::loadSceneFile, this, placeholders::_1);
+    _loadFileFunctions[".gltf"] = bind(&Plasma::loadSceneFile, this, placeholders::_1);
+    _loadFileFunctions[".glb"]  = bind(&Plasma::loadSceneFile, this, placeholders::_1);
 }
 #endif // INTERACTIVE_PLASMA
 
@@ -93,8 +111,36 @@ Plasma::~Plasma()
 
 #if defined(INTERACTIVE_PLASMA)
 // Runs the application message loop until the user quits the application.
-bool Plasma::run()
+bool Plasma::run(
+#if defined(__APPLE__)
+                 MTKView* view
+#endif
+                 )
 {
+#if defined(__APPLE__)
+    // Set a status update function on the performance monitor.
+    _performanceMonitor.setStatusFunction([this, view](const string& message) {
+        // Start building a report string with scene information and performance stats.
+        stringstream report;
+        report.imbue(locale("")); // thousands separator for integers
+        report << kAppName;
+        if(_sceneContents.instances.size() > 0) {
+            report << "  |  " << _sceneContents.vertexCount << " vertices / "
+                   << _sceneContents.triangleCount << " triangles / "
+                   << _sceneContents.instances.size() << " instance(s) / "
+                   << _sceneCamera << " of " << _sceneContents.cameras.size() << " camera(s) - " << ((_sceneCamera == 0) ? "freecam" : _sceneContents.cameras[_sceneCamera-1].name);
+        }
+
+        // Add the status report from the performance monitor.
+        report << message;
+
+#if defined(REPORT_PERF_TO_TTY)
+        cout << report.str() << "\n";
+#endif
+        view.window.title = [NSString stringWithUTF8String:report.str().c_str()];
+    });
+#endif
+    
     // Parse the command line arguments as options.
     // NOTE: This will exit the application if the help argument is supplied.
     parseOptions();
@@ -107,6 +153,7 @@ bool Plasma::run()
         return false;
     }
 
+#if defined(WIN32)
     // Show the window.
     ::ShowWindow(_hwnd, SW_SHOWNORMAL);
 
@@ -117,10 +164,12 @@ bool Plasma::run()
         ::TranslateMessage(&msg);
         ::DispatchMessage(&msg);
     }
+#endif
 
     return true;
 }
 
+#if defined(WIN32)
 // The static window callback function.
 LRESULT __stdcall Plasma::wndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
@@ -130,7 +179,10 @@ LRESULT __stdcall Plasma::wndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM
     // Return the result if valid, otherwise use default message processing.
     return result == -1 ? DefWindowProc(hWnd, message, wParam, lParam) : result;
 }
+#endif
+
 #else
+
 // Runs the application as one-pass command line program
 bool Plasma::run(int argc, char* argv[])
 {
@@ -148,6 +200,7 @@ bool Plasma::run(int argc, char* argv[])
 
     return true;
 }
+
 #endif
 
 // Creates a sample scene.
@@ -293,6 +346,7 @@ bool Plasma::getFloat3Option(const string& name, glm::vec3& value) const
 #if defined(INTERACTIVE_PLASMA)
 void Plasma::parseOptions()
 {
+#if defined(WIN32)
     // Command line arguments.
     int numArgs = 0;
 
@@ -320,12 +374,15 @@ void Plasma::parseOptions()
     // Get char pointer-to-pointer to pass to cxxopts.
     char** pArgv = argsNarrowPtr.data();
 #else
+    int numArgs  = gArgc;
+    const char** pArgv = gpArgv;
+#endif
+#else // INTERACTIVE_PLASMA
 void Plasma::parseOptions(int argc, char* argv[])
 {
     // Command line arguments.
     int numArgs  = argc;
     char** pArgv = argv;
-
 #endif
     // Initialize cxxopts options with application name.
     cxxopts::Options options("Plasma", "Plasma: Aurora example application.");
@@ -339,8 +396,11 @@ void Plasma::parseOptions(int argc, char* argv[])
     // clang-format off
     options.add_options()
         ("scene", "Scene file path to load (Wavefront OBJ format)",cxxopts::value<string>())
+        ("camera", "Camera file path to load (GLTF format)",cxxopts::value<string>())
+        ("camera_id", "Camera id",cxxopts::value<int>())
         ("reference", "Use reference BSDF", cxxopts::value<bool>())
         ("denoise", "Enable denoising", cxxopts::value<bool>())
+        ("gamma_correction", "Enable gamma correction", cxxopts::value<bool>())
         ("renderer", "Renderer type ('dx for DirectX, hgi for HGI.)", cxxopts::value<string>())
         ("e,eye", "Camera eye position as comma-separated 3D vector (e.g. 1,2,3)", cxxopts::value<vector<float>>())
         ("t,target", "Camera target position as comma-separated 3D vector (e.g. 1,2,3)", cxxopts::value<vector<float>>())
@@ -349,6 +409,8 @@ void Plasma::parseOptions(int argc, char* argv[])
         ("lightColor", "Directional light color as comma-separated 3D vector (e.g. 1,2,3)", cxxopts::value<vector<float>>())
         ("lightIntensity", "Directional light intensity", cxxopts::value<float>())
         ("output", "Output image file (if set will render once and exit)", cxxopts::value<string>())
+        ("output_spp", "SPP count for the output image (if set will render once and exit)", cxxopts::value<int>())
+        ("performance_output", "Output performance data file", cxxopts::value<string>())
         ("dims", "Window dimensions", cxxopts::value<vector<int>>())
         ("fov", "Camera field of view in degrees.", cxxopts::value<float>())
         ("env", "Environment map path to load (lat-long format .HDR file)", cxxopts::value<string>())
@@ -368,7 +430,7 @@ void Plasma::parseOptions(int argc, char* argv[])
     {
         stringstream message;
         message << options.help();
-#if defined(INTERACTIVE_PLASMA)
+#if defined(INTERACTIVE_PLASMA) && defined(WIN32)
         wstring messageWide = Foundation::s2w(message.str());
         ::MessageBox(nullptr, messageWide.c_str(), L"Command line options", MB_OK);
 #else
@@ -395,7 +457,7 @@ bool Plasma::initialize()
         }
     }
 
-#if defined(INTERACTIVE_PLASMA)
+#if defined(INTERACTIVE_PLASMA) && defined(WIN32)
     // Create the application window.
     _hwnd = createWindow(_dimensions);
     ::setMessageWindow(_hwnd);
@@ -488,6 +550,12 @@ bool Plasma::initialize()
     {
         _isDenoisingEnabled = arguments["denoise"].as<bool>();
     }
+
+    if (_pArguments->count("gamma_correction") > 0)
+    {
+        _pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+    }
+
     _camera.setDimensions(_dimensions);
 
     // Create an Aurora environment and ground plane.
@@ -567,6 +635,14 @@ bool Plasma::initialize()
         string envPath = arguments["env"].as<string>();
         loadEnvironmentImageFile(envPath);
     }
+    
+    // Get the camera file path from the camera argument.
+    if (arguments.count("camera"))
+    {
+        string cameraPath = arguments["camera"].as<string>();
+        loadSceneFile(cameraPath);
+        // APPLE TODO: shouldSetCamera = true ??
+    }
 
     // Set the camera view if needed.
     if (shouldSetCamera)
@@ -589,7 +665,7 @@ bool Plasma::initialize()
         AU_INFO("Output command line option is set. Rendered one image to %s, now exiting.",
             outputFile.c_str());
 
-#if defined(INTERACTIVE_PLASMA)
+#if defined(INTERACTIVE_PLASMA) && defined(WIN32)
         PostMessage(_hwnd, WM_CLOSE, 0, 0);
 #endif
     }
@@ -597,14 +673,36 @@ bool Plasma::initialize()
     else
     {
         // Create an Aurora window, which can be used to render into the application window.
+#if defined(WIN32)
         _pWindow = _pRenderer->createWindow(_hwnd, _dimensions.x, _dimensions.y);
+#else
+        _pWindow = _pRenderer->createWindow(nullptr, _dimensions.x, _dimensions.y);
+#endif
         if (!_pWindow)
         {
             return false;
         }
+#if defined(WIN32)
         _pRenderer->setTargets({ { Aurora::AOV::kFinal, _pWindow } });
+#else
+        _pRenderBuffer = _pRenderer->createRenderBuffer(_dimensions.x, _dimensions.y, Aurora::ImageFormat::Float_RGBA);
+        for (size_t i = 0; i < 6; i++)
+        {
+            _pAOVRenderBuffer[i] = _pRenderer->createRenderBuffer(_dimensions.x, _dimensions.y, Aurora::ImageFormat::Float_RGBA);
+        }
+        _pRenderer->setTargets({ { Aurora::AOV::kFinal, _pRenderBuffer },
+                                 { Aurora::AOV::kDepthNDC, _pAOVRenderBuffer[0]},
+                                 { Aurora::AOV::kMotion, _pAOVRenderBuffer[1]},
+                                 { Aurora::AOV::kDiffuseAlbedo, _pAOVRenderBuffer[2]},
+                                 { Aurora::AOV::kSpecularAlbedo, _pAOVRenderBuffer[3]},
+                                 { Aurora::AOV::kNormal, _pAOVRenderBuffer[4]},
+                                 { Aurora::AOV::kRoughness, _pAOVRenderBuffer[5]},
+        });
+        
+#endif
     }
 #endif
+    
     return true;
 }
 
@@ -712,7 +810,11 @@ void Plasma::updateNewScene()
 
     // Setup environment for new scene.
     _pScene->setEnvironmentProperties(
-        _environmentPath, { { Aurora::Names::EnvironmentProperties::kBackgroundUseScreen, true } });
+                                      _environmentPath, { { Aurora::Names::EnvironmentProperties::kBackgroundUseScreen, true },
+                                          { Aurora::Names::EnvironmentProperties::kBackgroundTop,    vec3(0.02f, 0.25f, 0.60f) },
+                                          { Aurora::Names::EnvironmentProperties::kBackgroundBottom, vec3(0.32f, 0.79f, 1.00f) }
+                                      });
+
     _pScene->setEnvironment(_environmentPath);
 
     _pScene->setGroundPlanePointer(_pGroundPlane);
@@ -752,8 +854,8 @@ void Plasma::updateLighting()
 
     // Update the environment light and background transforms.
     _pScene->setEnvironmentProperties(_environmentPath,
-        { { Aurora::Names::EnvironmentProperties::kLightTransform, transform },
-            { Aurora::Names::EnvironmentProperties::kBackgroundTransform, transform } });
+                                      { { Aurora::Names::EnvironmentProperties::kLightTransform,      transform },
+        { Aurora::Names::EnvironmentProperties::kBackgroundTransform, transform } });
 
     // Update the directional light.
     _pDistantLight->values().setFloat(Aurora::Names::LightProperties::kIntensity, lightIntensity);
@@ -793,17 +895,30 @@ void Plasma::updateSampleCount()
 // Updates the window.
 void Plasma::update()
 {
+    // TODO: really want to do something like this:
+//    std::shared_ptr<HGIRenderBuffer> hgiRenderBuffer = std::dynamic_pointer_cast<HGIRenderBuffer>(_pRenderer);
+//    _pRenderBuffer->storageTex();
+    
     // Prepare the performance monitor for the frame.
     _performanceMonitor.beginFrame(_shouldRestart);
 
     // Update lighting properties, which may have changed.
     updateLighting();
-
+    
+    _camera.update(1/30.f);
+#if defined(INTERACTIVE_PLASMA)
+    if(_camera.isMoving()) {
+        requestUpdate();
+        _performanceMonitor.beginFrame(true);
+    }
+#endif
+    
+    mat4 viewMatrix = _camera.viewMatrix();
+    mat4 projMatrix = _camera.projMatrix();
+    
     // Get the view and projection matrices from the camera as float arrays, and set them on the
     // renderer as the camera (view).
-    const float* viewArray = value_ptr(_camera.viewMatrix());
-    const float* projArray = value_ptr(_camera.projMatrix());
-    _pRenderer->setCamera(viewArray, projArray);
+    _pRenderer->setCamera(viewMatrix, projMatrix);
 
     // Render the scene, accumulating as many frames as possible within a target time, as
     // determined by the sample counter. This provides better visual results without making the
@@ -818,11 +933,12 @@ void Plasma::update()
 
     // Report the time to render the first frame. This includes the first scene update, which
     // performs acceleration structure building and other potentially time-consuming work.
-    if (_frameNumber == 0)
+    if (_frameNumber == 0 || _shouldRestart)
     {
         _pRenderer->waitForTask();
         ::infoMessage("First frame completed in " +
             to_string(static_cast<int>(firstFrameTimer.elapsed())) + " ms.");
+        _printedLastFrameMessage = false;
     }
 
     // Increment the frame counter and clear the restart flag.
@@ -836,7 +952,13 @@ void Plasma::update()
     {
         _pRenderer->waitForTask();
     }
-    _performanceMonitor.endFrame(isComplete, sampleCount);
+    float totalTimer = _performanceMonitor.endFrame(isComplete, sampleCount);
+    if (isComplete && !_printedLastFrameMessage)
+    {
+        ::infoMessage("Last frame completed in " +
+            to_string(static_cast<int>(totalTimer)) + " ms.");
+        _printedLastFrameMessage = true;
+    }
 }
 
 #if defined(INTERACTIVE_PLASMA)
@@ -847,8 +969,10 @@ void Plasma::requestUpdate(bool shouldRestart)
 {
     _shouldRestart = _shouldRestart || shouldRestart;
 
+#if defined(WIN32)
     // Invalidate the window to ensure that a paint message is sent.
     ::InvalidateRect(_hwnd, nullptr, FALSE);
+#endif
 }
 
 // Toggles the animating state of the application.
@@ -875,6 +999,7 @@ void Plasma::toggleFullScreen()
     // Toggle the full screen state.
     _isFullScreenEnabled = !_isFullScreenEnabled;
 
+#if defined(WIN32)
     LONG windowStyle     = 0;
     HWND windowZ         = nullptr;
     UINT windowShowState = SW_SHOWNORMAL;
@@ -916,6 +1041,7 @@ void Plasma::toggleFullScreen()
 
     // Show the window (again) so that changes take effect, with a show state.
     ::ShowWindow(_hwnd, windowShowState);
+#endif
 }
 
 // Toggles vsync (vertical sync).
@@ -971,8 +1097,9 @@ void Plasma::adjustMaxLuminanceExposure(float increment)
 // Displays a dialog for selecting a file to load, and loads it using the specified load
 // function.
 void Plasma::selectFile(
-    const string& extension, const wchar_t* pFilters, const LoadFileFunction& loadFunc)
+    [[maybe_unused]] const string& extension, [[maybe_unused]] const wchar_t* pFilters, [[maybe_unused]] const LoadFileFunction& loadFunc)
 {
+#if defined(WIN32)
     // Prepare a structure for displaying a file open dialog.
     array<wchar_t, MAX_PATH> filePath = { '\0' }; // must be initialized for GetOpenFileName()
     OPENFILENAME desc                 = {};
@@ -1006,6 +1133,7 @@ void Plasma::selectFile(
 
     addAssetPathContainingFile(Foundation::w2s(filePath.data()));
     loadFunc(Foundation::w2s(filePath.data()));
+#endif
 }
 
 #endif
@@ -1020,7 +1148,7 @@ void Plasma::addAssetPathContainingFile(const string& filePath)
 
 void Plasma::addAssetPath(const string& filePath)
 {
-    for (int i = 0; i < _assetPaths.size(); i++)
+    for (size_t i = 0; i < _assetPaths.size(); i++)
     {
         if (_assetPaths[i].compare(filePath) == 0)
             return;
@@ -1071,6 +1199,38 @@ bool Plasma::loadSceneFile(const string& filePath)
     auto directory = filesystem::path(filePath).parent_path();
     filesystem::current_path(directory);
 
+    // TODO: when we support full scene loading (and not just cameras) remove this block and use the block below to load gltf and glb
+    std::filesystem::path stdFilePath = filePath;
+    std::filesystem::path foundExtension = stdFilePath.extension();
+    if(foundExtension.compare(".gltf") == 0 || foundExtension.compare(".glb") == 0) {
+        if (!loadSceneFunc(_pRenderer.get(), _pScene.get(), filePath, _sceneContents))
+        {
+            ::errorMessage("Unable to load the specified scene file: \"" + filePath + "\"");
+            return false;
+        }
+        // Report the load time.
+        ::infoMessage("Loaded scene file \"" + filePath + "\" in " +
+            to_string(static_cast<int>(loadTimer.elapsed())) + " ms.");
+
+#if defined(INTERACTIVE_PLASMA)
+        if(_sceneContents.cameras.size() > 0) {
+            if (_pArguments->count("camera_id"))
+            {
+                switchToCamera((*_pArguments)["camera_id"].as<int>());
+                
+            }
+            else
+            {
+                switchToCamera(0);
+            }
+        }
+        else {
+            switchToCamera(0);
+        }
+#endif
+        return true;
+    }
+    
     // Create new empty scene
     _pScene = _pRenderer->createScene();
 
@@ -1111,25 +1271,81 @@ void Plasma::saveImage(const wstring& filePath, const uvec2& dimensions)
 
     // Get the view and projection matrices from the camera as float arrays, and set them on the
     // renderer as the camera (view).
-    auto* viewArray = reinterpret_cast<const float*>(&_camera.viewMatrix());
-    auto* projArray = reinterpret_cast<const float*>(&_camera.projMatrix());
+    _camera.update(1.0f);
+    mat4 viewMatrix = _camera.viewMatrix();
+    mat4 projMatrix = _camera.projMatrix();
+    
+    // Get the view and projection matrices from the camera as float arrays, and set them on the
+    // renderer as the camera (view).
+    const float* viewArray = value_ptr(viewMatrix);
+    const float* projArray = value_ptr(projMatrix);
+
     _pRenderer->setCamera(viewArray, projArray);
 
     // Create a temporary render buffer.
-    Aurora::IRenderBufferPtr pRenderBuffer = _pRenderer->createRenderBuffer(
-        dimensions.x, dimensions.y, Aurora::ImageFormat::Integer_RGBA);
+    Aurora::IRenderBufferPtr pRenderBuffer;
+    if (filePath.back() == 'r')
+    {
+        pRenderBuffer = _pRenderer->createRenderBuffer(
+            dimensions.x, dimensions.y, Aurora::ImageFormat::Float_RGBA);
+    }
+    else
+    {
+        pRenderBuffer = _pRenderer->createRenderBuffer(
+            dimensions.x, dimensions.y, Aurora::ImageFormat::Integer_RGBA);
+    }
 
     // Render with the render buffer, then restore the window as the renderer's final target.
-    _pRenderer->setTargets({ { Aurora::AOV::kFinal, pRenderBuffer } });
-    _pRenderer->render(0, 100);
-    _pRenderer->setTargets({ { Aurora::AOV::kFinal, _pWindow } });
+    for (size_t i = 0; i < 6; i++)
+    {
+        _pAOVRenderBuffer[i] = _pRenderer->createRenderBuffer(_dimensions.x, _dimensions.y, Aurora::ImageFormat::Float_RGBA);
+    }
+    _pRenderer->setTargets({ { Aurora::AOV::kFinal, pRenderBuffer },
+                             { Aurora::AOV::kDepthNDC, _pAOVRenderBuffer[0]},
+                             { Aurora::AOV::kMotion, _pAOVRenderBuffer[1]},
+                             { Aurora::AOV::kDiffuseAlbedo, _pAOVRenderBuffer[2]},
+                             { Aurora::AOV::kSpecularAlbedo, _pAOVRenderBuffer[3]},
+                             { Aurora::AOV::kNormal, _pAOVRenderBuffer[4]},
+                             { Aurora::AOV::kRoughness, _pAOVRenderBuffer[5]},
+    });
+    Foundation::CPUTimer firstFrameTimer;
+    if (_pArguments->count("output_spp"))
+    {
+        _pRenderer->render(0, (*_pArguments)["output_spp"].as<int>());
+    }
+    else
+    {
+        _pRenderer->render(0, 1000);
+    }
+
+    firstFrameTimer.suspend();
+    if (_pArguments->count("performance_output"))
+    {
+        std::ofstream myfile;
+        string outputFile = (*_pArguments)["performance_output"].as<string>();
+        myfile.open (outputFile);
+        myfile << firstFrameTimer.elapsed() << "\n";
+        myfile.close();
+    }
+
+    ::infoMessage("Rendering completed in " +
+            to_string(static_cast<int>(firstFrameTimer.elapsed())) + " ms.");
 
     // Get the data from the render buffer, and save it to a PNG file with the specified path.
     size_t stride     = 0;
     const void* pData = pRenderBuffer->data(stride);
-    int res = ::stbi_write_png(Foundation::w2s(filePath).c_str(), dimensions.x, dimensions.y, 4,
-        pData, static_cast<int>(stride));
-    AU_ASSERT(res, "Failed to write PNG: %s", Foundation::w2s(filePath).c_str());
+    if (filePath.back() == 'r')
+    {
+        int res = ::stbi_write_hdr(Foundation::w2s(filePath).c_str(), _dimensions.x, _dimensions.y, 4, static_cast<const float*>(pData));
+        AU_ASSERT(res, "Failed to write HDR screenshot: %s", filePath);
+    }
+    else
+    {
+        int res = ::stbi_write_png(Foundation::w2s(filePath).c_str(), dimensions.x, dimensions.y, 4,
+            pData, static_cast<int>(stride));
+        AU_ASSERT(res, "Failed to write PNG: %s", Foundation::w2s(filePath).c_str());
+    }
+
 }
 
 Aurora::Path Plasma::loadMaterialXFile(const string& filePath)
@@ -1221,7 +1437,7 @@ void Plasma::resetMaterials()
 #endif
 }
 
-#if defined(INTERACTIVE_PLASMA)
+#if defined(INTERACTIVE_PLASMA) && defined(WIN32)
 // Processes a message for the application window.
 LRESULT Plasma::processMessage(UINT message, WPARAM wParam, LPARAM lParam)
 {
@@ -1327,9 +1543,19 @@ HWND Plasma::createWindow(const uvec2& dimensions)
     return hwnd;
 }
 
+#endif
+    
+#if defined(INTERACTIVE_PLASMA)
+
+    
 // Handles dropping of files on to the window.
+#if defined(WIN32)
 void Plasma::onFilesDropped(HDROP hDrop)
+#else
+void Plasma::onFilesDropped(NSURL* url)
+#endif
 {
+#if defined(WIN32)
     // Get the path of the first file dropped.
     array<wchar_t, MAX_PATH> filePathW;
     ::DragQueryFile(hDrop, 0, filePathW.data(), MAX_PATH);
@@ -1354,19 +1580,97 @@ void Plasma::onFilesDropped(HDROP hDrop)
         addAssetPathContainingFile(filePath);
         (*funcIt).second(filePath);
     }
+#else
+    
+    std::filesystem::path filePath = [url.path UTF8String];
+    std::filesystem::path foundExtension = filePath.extension();
+    auto funcIt = _loadFileFunctions.find(foundExtension);
+    if (funcIt == _loadFileFunctions.end())
+    {
+        ::errorMessage("Unknown file extension: " + foundExtension.string());
+    }
+    else
+    {
+        addAssetPathContainingFile(filePath);
+        (*funcIt).second(filePath);
+        requestUpdate();
+    }
+#endif
 }
 
+void Plasma::switchToCamera(unsigned int newCamera)
+{
+    if (newCamera == _sceneCamera)
+    {
+        return;
+    }
+    if (newCamera == 0)
+    {
+        _camera.moveTo(_savedCameraView);
+        _camera.setProjection(_savedPerspectiveCamera.yfov, _savedPerspectiveCamera.znear,
+            _savedPerspectiveCamera.zfar);
+        _camera.setAspect(_savedPerspectiveCamera.aspectRatio);
+        requestUpdate();
+        _sceneCamera = newCamera;
+    }
+    else if (newCamera <= _sceneContents.cameras.size())
+    {
+        // save the current camera if it's the interactive camera
+        if (_sceneCamera == 0)
+        {
+            _savedCameraView                    = _camera.viewMatrix();
+            _savedPerspectiveCamera.yfov        = _camera.fov();
+            _savedPerspectiveCamera.znear       = _camera.getNear();
+            _savedPerspectiveCamera.zfar        = _camera.getFar();
+            _savedPerspectiveCamera.aspectRatio = _camera.aspectRatio();
+        }
+        SceneCamera sceneCamera = _sceneContents.cameras[newCamera - 1];
+        _camera.moveTo(sceneCamera.viewMatrix);
+        switch (sceneCamera.cameraType)
+        {
+        case SCENE_CAMERA_TYPE_PERSPECTIVE:
+        {
+            _camera.setProjection(sceneCamera.perspectiveProperties.yfov,
+                sceneCamera.perspectiveProperties.znear, sceneCamera.perspectiveProperties.zfar);
+            _camera.setAspect(sceneCamera.perspectiveProperties.aspectRatio);
+            break;
+        }
+        case SCENE_CAMERA_TYPE_ORTHOGRAPHIC:
+        {
+            //                    projMatrix = glm::ortho(-sceneCamera.orthographicProperties.xmag,
+            //                                            sceneCamera.orthographicProperties.xmag,
+            //                                            -sceneCamera.orthographicProperties.ymag,
+            //                                            sceneCamera.orthographicProperties.ymag,
+            //                                            sceneCamera.perspectiveProperties.znear,
+            //                                            sceneCamera.perspectiveProperties.zfar);
+            break;
+        }
+        }
+
+        requestUpdate();
+        _sceneCamera = newCamera;
+    }
+}
+
+//#define DEBUG_AOV_KEYS 1
+
 // Handles key presses.
+#if defined(WIN32)
 void Plasma::onKeyPressed(WPARAM keyCode)
+#else
+void Plasma::onKeyPressed(NSString* characters, NSEventModifierFlags modifierFlags)
+#endif
 {
     // Get the renderer options object.
     Aurora::IValues& options = _pRenderer->options();
+#if defined(WIN32)
 
+    constexpr int kZeroKey      = 0x30;
+#if defined(DEBUG_AOV_KEYS)
+    constexpr int kTildeKey     = 0xC0;
+    constexpr int kMaxDebugMode = 10;
     // For sequential keys starting with 0, enable the corresponding debug mode, e.g. 2 means
     // debug mode 2 (show the view depth AOV).
-    constexpr int kTildeKey     = 0xC0;
-    constexpr int kZeroKey      = 0x30;
-    constexpr int kMaxDebugMode = 10;
     if (keyCode == kTildeKey || (keyCode >= kZeroKey && keyCode < kZeroKey + kMaxDebugMode))
     {
         // Determine and set the debug mode based on the key code:
@@ -1385,7 +1689,260 @@ void Plasma::onKeyPressed(WPARAM keyCode)
 
         return;
     }
+#else
+    constexpr int kMaxCameras = 9;
+    if ((keyCode >= kZeroKey && keyCode < kZeroKey + kMaxCameras))
+    {
+        if (keyCode == kZeroKey)
+        {
+            switchToCamera(0);
+            requestUpdate();
+        }
+        else
+        {
+            unsigned int newCamera = static_cast<unsigned int>(keyCode - kZeroKey);
+            if (newCamera <= _sceneContents.cameras.size())
+            {
+                switchToCamera(newCamera);
+                requestUpdate();
+            }
+        }
+    }
+#endif
 
+#endif
+
+#if defined(__APPLE__)
+    // F: Fit the view to the scene, retaining the current direction and up vectors.
+    if([characters caseInsensitiveCompare:@"F"] == NSOrderedSame) {
+        if(_sceneCamera == 0) {
+            _camera.fit(_sceneContents.bounds);
+            requestUpdate();
+        }
+    }
+    else if([characters caseInsensitiveCompare:@"O"] == NSOrderedSame && modifierFlags & NSEventModifierFlagControl) {
+        NSOpenPanel* openPanel = [NSOpenPanel openPanel];
+        openPanel.message = @"Choose your 3D model files (.obj, .gltf, .glb)";
+//        openPanel.prompt = @"Import";
+        openPanel.canChooseFiles = YES;
+        openPanel.canChooseDirectories = NO;
+        openPanel.allowsMultipleSelection = YES;
+        openPanel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"obj"],
+                                          [UTType typeWithFilenameExtension:@"gltf"],
+                                          [UTType typeWithFilenameExtension:@"glb"]];
+        if([openPanel runModal] == NSModalResponseOK) {
+            for(NSURL* url in openPanel.URLs) {
+                onFilesDropped(url);
+            }
+        }
+    }
+    else if([characters caseInsensitiveCompare:@"E"] == NSOrderedSame && modifierFlags & NSEventModifierFlagControl) {
+        NSOpenPanel* openPanel = [NSOpenPanel openPanel];
+        openPanel.message = @"Choose an environment map (.hdr)";
+        openPanel.canChooseFiles = YES;
+        openPanel.canChooseDirectories = NO;
+        openPanel.allowsMultipleSelection = NO;
+        openPanel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"hdr"]];
+        if([openPanel runModal] == NSModalResponseOK) {
+            onFilesDropped(openPanel.URL);
+        }
+    }
+    else if([characters caseInsensitiveCompare:@"M"] == NSOrderedSame && modifierFlags & NSEventModifierFlagControl) {
+        NSOpenPanel* openPanel = [NSOpenPanel openPanel];
+        openPanel.message = @"Choose an mtlx file (.mtlx)";
+        openPanel.canChooseFiles = YES;
+        openPanel.canChooseDirectories = NO;
+        openPanel.allowsMultipleSelection = NO;
+        openPanel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"mtlx"]];
+        if([openPanel runModal] == NSModalResponseOK) {
+            onFilesDropped(openPanel.URL);
+        }
+    }
+    // Space: Toggle animation.
+    else if([characters caseInsensitiveCompare:@" "] == NSOrderedSame) {
+        toggleAnimation();
+    }
+    // A: Add a camera to the scene
+    else if([characters caseInsensitiveCompare:@"A"] == NSOrderedSame) {
+        SceneCamera sceneCamera;
+        sceneCamera.cameraType = _camera.isOrtho() ? SCENE_CAMERA_TYPE_ORTHOGRAPHIC : SCENE_CAMERA_TYPE_PERSPECTIVE;
+        sceneCamera.viewMatrix = _camera.viewMatrix();
+        sceneCamera.name = std::string("Camera_") + std::to_string(_sceneContents.cameras.size());
+        if(sceneCamera.cameraType == SCENE_CAMERA_TYPE_PERSPECTIVE) {
+            sceneCamera.perspectiveProperties.yfov = _camera.fov();
+            sceneCamera.perspectiveProperties.aspectRatio = _camera.aspectRatio();
+            sceneCamera.perspectiveProperties.znear = _camera.getNear();
+            sceneCamera.perspectiveProperties.zfar = _camera.getFar();
+        }
+        else {
+            sceneCamera.orthographicProperties.znear = _camera.getNear();
+            sceneCamera.orthographicProperties.zfar = _camera.getFar();
+            const ivec2& dims = _camera.dimensions();
+            sceneCamera.orthographicProperties.xmag = dims.x / 2;
+            sceneCamera.orthographicProperties.ymag = dims.y / 2;
+        }
+        _sceneContents.cameras.push_back(sceneCamera);
+    }
+    // C: Toggle orthographic projection.
+    else if([characters caseInsensitiveCompare:@"C"] == NSOrderedSame) {
+        switchToCamera(0);
+        _isOrthoProjection = !_isOrthoProjection;
+        _camera.setIsOrtho(_isOrthoProjection);
+        requestUpdate();
+    }
+    // D: Toggle diffuse only.
+    // SHIFT-D: Toggle denoising.
+    else if([characters caseInsensitiveCompare:@"D"] == NSOrderedSame) {
+        if (modifierFlags & NSEventModifierFlagShift)
+        {
+            _isDenoisingEnabled = !_isDenoisingEnabled;
+            options.setBoolean("isDenoisingEnabled", _isDenoisingEnabled);
+            updateSampleCount();
+        }
+        else
+        {
+            _isDiffuseOnlyEnabled = !_isDiffuseOnlyEnabled;
+            options.setBoolean("isDiffuseOnlyEnabled", _isDiffuseOnlyEnabled);
+        }
+        requestUpdate();
+    }
+    // S:      Save the current image to a file.
+    // CTRL-S: Save cameras to a file using a save panel
+    else if([characters caseInsensitiveCompare:@"S"] == NSOrderedSame) {
+
+        if(modifierFlags & NSEventModifierFlagControl) {
+            NSSavePanel *savePanel = [NSSavePanel savePanel];
+            savePanel.message = @"Save the current scene’s cameras to a GLTF file";
+            savePanel.prompt = @"Export";
+            savePanel.nameFieldStringValue = @"Cameras.gltf";
+            savePanel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"gltf"]];
+            if ([savePanel runModal] == NSModalResponseOK) {
+                string filePath = savePanel.URL.path.UTF8String;
+                saveglTFFile(nullptr, nullptr, filePath, _sceneContents);
+            }
+        }
+        else {
+            string filePath;
+            for(uint32_t num = 1; num < kMaxScreenshots; ++num) {
+                filePath = Foundation::sFormat(kScreenshotFormat, num);
+                if(!std::filesystem::exists(filePath)) {
+                    break;
+                }
+            }
+            size_t stride = 0;
+            const void* pData = _pRenderBuffer->data(stride);
+            int imagePixelSize = _dimensions.x * _dimensions.y * 4;
+            unsigned char* imageData = new unsigned char[imagePixelSize];
+            for (int i = 0; i < imagePixelSize; ++i) {
+                float val = (static_cast<const float*>(pData))[i];
+                val = val < 0.0f ? 0.0f : (val > 1.0f ? 1.0f : val);
+                imageData[i] = static_cast<unsigned char>(val * 255.0f + 0.5f);
+            }
+            stride = _dimensions.x * 4;
+            int res = ::stbi_write_png(filePath.c_str(), _dimensions.x, _dimensions.y, 4, imageData, static_cast<int>(stride));
+            AU_ASSERT(res, "Failed to write PNG screenshot: %s", filePath);
+        }
+    }
+    // H: Save the current image to an HDR file.
+    else if([characters caseInsensitiveCompare:@"H"] == NSOrderedSame) {
+        string filePath;
+        for(uint32_t num = 1; num < kMaxScreenshots; ++num) {
+            filePath = Foundation::sFormat(kScreenshotHdrFormat, num);
+            if(!std::filesystem::exists(filePath)) {
+                break;
+            }
+        }
+        size_t stride = 0;
+        const void* pData = _pRenderBuffer->data(stride);
+        int res = ::stbi_write_hdr(filePath.c_str(), _dimensions.x, _dimensions.y, 4, static_cast<const float*>(pData));
+        AU_ASSERT(res, "Failed to write HDR screenshot: %s", filePath);
+    }
+    // [: Decrease max trace depth.
+    else if([characters caseInsensitiveCompare:@"["] == NSOrderedSame) {
+        _traceDepth = glm::max(1, _traceDepth - 1);
+        options.setInt("traceDepth", _traceDepth);
+        requestUpdate();
+    }
+    // ]: Increase max trace depth.
+    else if([characters caseInsensitiveCompare:@"]"] == NSOrderedSame) {
+        _traceDepth = glm::min(10, _traceDepth + 1);
+        options.setInt("traceDepth", _traceDepth);
+        requestUpdate();
+    }
+    // T: Toggle tone mapping.
+    else if([characters caseInsensitiveCompare:@"T"] == NSOrderedSame) {
+        _isToneMappingEnabled = !_isToneMappingEnabled;
+        options.setBoolean("isToneMappingEnabled", _isToneMappingEnabled);
+        requestUpdate();
+    }
+    // G: Toggle gamma correction.
+    else if([characters caseInsensitiveCompare:@"G"] == NSOrderedSame) {
+        _isGammaCorrectionEnabled = !_isGammaCorrectionEnabled;
+        options.setBoolean("isGammaCorrectionEnabled", _isGammaCorrectionEnabled);
+        requestUpdate();
+    }
+    // L: Toggle the directional light.
+    else if([characters caseInsensitiveCompare:@"L"] == NSOrderedSame) {
+        _isDirectionalLightEnabled = !_isDirectionalLightEnabled;
+        requestUpdate();
+    }
+    // +: Increase exposure.
+    // CTRL+: Increase max luminance exposure.
+    else if([characters caseInsensitiveCompare:@"="] == NSOrderedSame) {
+        if (modifierFlags & NSEventModifierFlagControl)
+        {
+            adjustMaxLuminanceExposure(1.0f);
+        }
+        else
+        {
+            adjustExposure(0.5f);
+        }
+    }
+    // -: Decrease exposure.
+    // CTRL-: Decrease max luminance exposure.
+    else if([characters caseInsensitiveCompare:@"-"] == NSOrderedSame) {
+        if (modifierFlags & NSEventModifierFlagControl)
+        {
+            adjustMaxLuminanceExposure(-1.0f);
+        }
+        else
+        {
+            adjustExposure(-0.5f);
+        }
+    }
+    else if([characters caseInsensitiveCompare:@"0"] == NSOrderedSame) {
+        switchToCamera(0);
+    }
+    else if([characters caseInsensitiveCompare:@"1"] == NSOrderedSame) {
+        switchToCamera(1);
+    }
+    else if([characters caseInsensitiveCompare:@"2"] == NSOrderedSame) {
+        switchToCamera(2);
+    }
+    else if([characters caseInsensitiveCompare:@"3"] == NSOrderedSame) {
+        switchToCamera(3);
+    }
+    else if([characters caseInsensitiveCompare:@"4"] == NSOrderedSame) {
+        switchToCamera(4);
+    }
+    else if([characters caseInsensitiveCompare:@"5"] == NSOrderedSame) {
+        switchToCamera(5);
+    }
+    else if([characters caseInsensitiveCompare:@"6"] == NSOrderedSame) {
+        switchToCamera(6);
+    }
+    else if([characters caseInsensitiveCompare:@"7"] == NSOrderedSame) {
+        switchToCamera(7);
+    }
+    else if([characters caseInsensitiveCompare:@"8"] == NSOrderedSame) {
+        switchToCamera(8);
+    }
+    else if([characters caseInsensitiveCompare:@"9"] == NSOrderedSame) {
+        switchToCamera(9);
+    }
+
+#else
+    
     switch (keyCode)
     {
     // ESC: Destroy the main window.
@@ -1412,6 +1969,7 @@ void Plasma::onKeyPressed(WPARAM keyCode)
 
     // C: Toggle orthographic projection.
     case 0x43:
+        switchToCamera(0);
         _isOrthoProjection = !_isOrthoProjection;
         _camera.setIsOrtho(_isOrthoProjection);
         requestUpdate();
@@ -1445,6 +2003,7 @@ void Plasma::onKeyPressed(WPARAM keyCode)
 
     // F: Fit the view to the scene, retaining the current direction and up vectors.
     case 0x46:
+        switchToCamera(0);
         _camera.fit(_sceneContents.bounds);
         requestUpdate();
         break;
@@ -1520,7 +2079,7 @@ void Plasma::onKeyPressed(WPARAM keyCode)
 
     // S: Save the current image to a file.
     case 0x53:
-        saveImage(L"capture.png", uvec2(1920, 1080));
+        saveImage(L"capture.png", uvec2(1280, 720));
         break;
 
     // T: Toggle tone mapping.
@@ -1600,37 +2159,79 @@ void Plasma::onKeyPressed(WPARAM keyCode)
         requestUpdate();
         break;
     }
+#endif
+}
+#endif
+    
+#if defined(__APPLE__)
+// Handles mouse moves.
+void Plasma::onMouseMoved(int xPos, int yPos, bool leftButtonPressed, bool middleButtonPressed, bool rightButtonPressed)
+{
+    if(_sceneCamera == 0 && !_camera.isMoving()) {
+        // Update the camera.
+        Camera::Inputs inputs = {};
+        inputs.LeftButton     = leftButtonPressed;
+        inputs.MiddleButton   = middleButtonPressed;
+        inputs.RightButton    = rightButtonPressed;
+        _camera.mouseMove(xPos, -yPos, inputs);
+
+        // Request an update if the camera is dirty.
+        if(_camera.isDirty()) {
+            requestUpdate();
+        }
+    }
 }
 
+void Plasma::onMouseWheel(int delta) {
+    if(_sceneCamera == 0 && !_camera.isMoving()) {
+        // Update the camera.
+        Camera::Inputs inputs = {};
+        inputs.Wheel          = true;
+        _camera.mouseMove(0, -delta, inputs);
+        
+        // Request an update if the camera is dirty.
+        if (_camera.isDirty()) {
+            requestUpdate();
+        }
+    }
+}
+    
+#endif
+    
+#if defined(INTERACTIVE_PLASMA) && defined(WIN32)
 // Handles mouse moves.
 void Plasma::onMouseMoved(int xPos, int yPos, WPARAM buttons)
 {
-    // Update the camera.
-    Camera::Inputs inputs = {};
-    inputs.LeftButton     = (buttons & MK_LBUTTON) != 0;
-    inputs.MiddleButton   = (buttons & MK_MBUTTON) != 0;
-    inputs.RightButton    = (buttons & MK_RBUTTON) != 0;
-    _camera.mouseMove(xPos, yPos, inputs);
+    if (_sceneCamera == 0 && !_camera.isMoving()){
+        // Update the camera.
+        Camera::Inputs inputs = {};
+        inputs.LeftButton     = (buttons & MK_LBUTTON) != 0;
+        inputs.MiddleButton   = (buttons & MK_MBUTTON) != 0;
+        inputs.RightButton    = (buttons & MK_RBUTTON) != 0;
+        _camera.mouseMove(xPos, yPos, inputs);
 
-    // Request an update if the camera is dirty.
-    if (_camera.isDirty())
-    {
-        requestUpdate();
+        // Request an update if the camera is dirty.
+        if (_camera.isDirty())
+        {
+            requestUpdate();
+        }
     }
 }
 
 // Handle mouse wheel input.
 void Plasma::onMouseWheel(int delta, WPARAM /*buttons*/)
 {
-    // Update the camera.
-    Camera::Inputs inputs = {};
-    inputs.Wheel          = true;
-    _camera.mouseMove(0, delta, inputs);
+    if (_sceneCamera == 0 && !_camera.isMoving()) {
+        // Update the camera.
+        Camera::Inputs inputs = {};
+        inputs.Wheel          = true;
+        _camera.mouseMove(0, delta, inputs);
 
-    // Request an update if the camera is dirty.
-    if (_camera.isDirty())
-    {
-        requestUpdate();
+        // Request an update if the camera is dirty.
+        if (_camera.isDirty())
+        {
+            requestUpdate();
+        }
     }
 }
 
@@ -1679,6 +2280,30 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE /*hPrevInstance
     return result ? 0 : -1;
 }
 #else  //! INTERACTIVE_PLASMA
+
+#if defined(__APPLE__)
+#import <Cocoa/Cocoa.h>
+
+int main(int argc, const char * argv[]) {
+    @autoreleasepool {
+        // Setup code that might create autoreleased objects goes here.
+    }
+    Plasma app;
+    gpApp       = &app;
+    gArgc       = argc;
+    gpArgv      = argv;
+
+    for (int i = 0; i < argc; i++)
+    {
+        if (strcasecmp(argv[i], "--output") == 0)
+        {
+            bool result = app.run(nullptr);
+            return result ? 0 : -1;
+        }
+    }
+    return NSApplicationMain(argc, argv);
+}
+#else
 int main(int argc, char* argv[])
 {
     // Create an application object on the stack, and run it. The run() function returns when
@@ -1689,4 +2314,6 @@ int main(int argc, char* argv[])
 
     return result ? 0 : -1;
 }
+#endif
+    
 #endif // INTERACTIVE_PLASMA

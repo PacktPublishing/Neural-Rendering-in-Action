@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,11 +13,12 @@
 // limitations under the License.
 #include "pch.h"
 
-#if defined(INTERACTIVE_PLASMA)
+#if defined(INTERACTIVE_PLASMA) && defined(WIN32)
 // Window global variable from pch.h.
 HWND gWindow = nullptr;
 #endif
 
+#if !defined(__APPLE__)
 // Prepare the implementations of these header-only libraries.
 // NOTE: This must be done in a *single* source file; other source files can just include the
 // header(s).
@@ -28,6 +29,10 @@ HWND gWindow = nullptr;
 #include <tiny_gltf.h>
 #pragma warning(push)
 #pragma warning(disable : 4996)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
+#pragma clang diagnostic pop
 #pragma warning(pop)
+#endif

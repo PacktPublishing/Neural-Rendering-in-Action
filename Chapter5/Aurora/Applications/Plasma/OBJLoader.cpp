@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -94,6 +94,17 @@ bool loadOBJFile(Aurora::IRenderer* /*pRenderer*/, Aurora::IScene* pScene, const
     if (!result || shapes.empty())
     {
         return false;
+    }
+
+    if (!sErrors.empty())
+    {
+        AU_WARN("LoadOBJFile Errors: %s", sErrors.c_str());
+        return false;
+    }
+
+    if (!sWarnings.empty())
+    {
+        AU_WARN("LoadOBJFile Warnings: %s", sWarnings.c_str());
     }
 
     // Report the file read time.
@@ -277,8 +288,41 @@ bool loadOBJFile(Aurora::IRenderer* /*pRenderer*/, Aurora::IScene* pScene, const
             // index map.
             else
             {
+                // Validate all indices before proceeding to avoid memory corruption
+                const size_t posIndex = objIndex.vertex_index * 3;
+                if (posIndex + 3 > srcPositions.size())
+                {
+                    AU_WARN("Invalid vertex index %d in OBJ file %s", objIndex.vertex_index,
+                        filePath.c_str());
+                    continue;
+                }
+
+                // Check normal index bounds if normals are expected
+                if (bHasNormals)
+                {
+                    if (objIndex.normal_index < 0 ||
+                        static_cast<size_t>(objIndex.normal_index * 3) >= srcNormals.size())
+                    {
+                        AU_WARN("Invalid normal index %d in OBJ file %s", objIndex.normal_index,
+                            filePath.c_str());
+                        continue;
+                    }
+                }
+
+                // Check texture coordinate index bounds if texture coordinates are expected
+                if (bHasTexCoords)
+                {
+                    if (objIndex.texcoord_index < 0 ||
+                        static_cast<size_t>(objIndex.texcoord_index * 2) >= srcTexCoords.size())
+                    {
+                        AU_WARN("Invalid texture coordinate index %d in OBJ file %s",
+                            objIndex.texcoord_index, filePath.c_str());
+                        continue;
+                    }
+                }
+
                 // Add the position (XYZ) value, including updating the bounding box if needed.
-                const float* position = &srcPositions[objIndex.vertex_index * 3];
+                const float* position = &srcPositions[posIndex];
                 sceneContents.bounds.add(position);
                 positions.push_back(*position++);
                 positions.push_back(*position++);
@@ -406,8 +450,15 @@ bool loadOBJFile(Aurora::IRenderer* /*pRenderer*/, Aurora::IScene* pScene, const
             { { Aurora::Names::InstanceProperties::kTransform, mat4() } } };
 
         if (material_id >= 0)
+        {
+            if (static_cast<size_t>(material_id) >= lstMaterials.size())
+            {
+                AU_WARN("Invalid material ID %d in OBJ file %s", material_id, filePath.c_str());
+                material_id = 0; // Use the first material as a fallback.
+            }
             instDef.properties[Aurora::Names::InstanceProperties::kMaterial] =
                 lstMaterials[material_id];
+        }
         pScene->addInstance(sceneInstancePath, geomPath, instDef.properties);
 
         sceneContents.instances.push_back({ instDef, geomPath });

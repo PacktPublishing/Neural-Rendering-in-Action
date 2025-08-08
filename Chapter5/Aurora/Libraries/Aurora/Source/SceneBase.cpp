@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -103,7 +103,8 @@ void SceneBase::createDefaultResources()
     ImageDescriptor imageDesc;
     imageDesc.isEnvironment = false;
     imageDesc.linearize     = true;
-    imageDesc.getData       = [this](ImageData& dataOut, AllocateBufferFunction alloc) {
+    imageDesc.getData       = [this](ImageData& dataOut, [[maybe_unused]] AllocateBufferFunction alloc) {
+        (void)alloc; // Suppress unreferenced parameter warning
         dataOut.pPixelBuffer = _defaultImagePixels.data();
         dataOut.bufferSize   = _defaultImagePixels.size();
         dataOut.dimensions   = { 2, 2 };
@@ -212,7 +213,16 @@ void SceneBase::setImageFromFilePath(
     imageDesc.isEnvironment = isEnvironment;
 
     // Setup pixel data callback to get address and size from buffer from cache entry.
+#if defined(__APPLE__)
+    // TODO: probably need to do similar for linux ?
+    string pathToLoad = Foundation::replace(filePath, "\\", "/");
+    // TODO: tmp fix for scenes with incorrect file paths
+    if(pathToLoad[0] == '/' && !isEnvironment) {
+        pathToLoad.erase(0, 1);
+    }
+#else
     string pathToLoad = filePath;
+#endif
     imageDesc.getData = [this, forceLinear, pathToLoad](
                             Aurora::ImageData& dataOut, AllocateBufferFunction /* alloc*/) {
         shared_ptr<ImageAsset> pImageAsset;

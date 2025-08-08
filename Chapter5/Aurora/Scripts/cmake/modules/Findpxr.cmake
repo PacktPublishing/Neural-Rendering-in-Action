@@ -1,5 +1,25 @@
 # Prevent re-defining the package target
-if(TARGET pxr::usd)
+if(TARGET pxr::usd OR TARGET usd)
+  if(NOT PXR_LIBRARY_DIRS)
+    cmake_path(GET PXR_INCLUDE_DIRS PARENT_PATH PXR_INSTALL_PREFIX)
+    set(PXR_LIBRARY_DIRS "${PXR_INSTALL_PREFIX}/lib")
+    mark_as_advanced(
+      PXR_LIBRARY_DIRS
+    )
+  endif()
+  return()
+endif()
+
+# Use official USD CMake config if available
+find_package(pxr CONFIG QUIET)
+if(TARGET pxr::usd OR TARGET usd)
+  if(NOT PXR_LIBRARY_DIRS)
+    cmake_path(GET PXR_INCLUDE_DIRS PARENT_PATH PXR_INSTALL_PREFIX)
+    set(PXR_LIBRARY_DIRS "${PXR_INSTALL_PREFIX}/lib")
+    mark_as_advanced(
+      PXR_LIBRARY_DIRS
+    )
+  endif()
   return()
 endif()
 
@@ -44,28 +64,32 @@ if(NOT OPENSUBDIV_FOUND)
     set(OPENSUBDIV_USE_GPU TRUE)
     find_package(OpenSubdiv REQUIRED)
 endif()
-if(NOT Vulkan_shaderc_combined_FOUND)
-  # Vulkan is required by hgiVulkan
-  find_package(Vulkan COMPONENTS shaderc_combined) # requires cmake 3.24
+if(NOT APPLE)
+  if(NOT Vulkan_shaderc_combined_FOUND)
+    # Vulkan is required by hgiVulkan
+    find_package(Vulkan COMPONENTS shaderc_combined) # requires cmake 3.24
+  endif()
 endif()
 if(NOT OpenGL_FOUND)
   find_package(OpenGL REQUIRED)
 endif()
 
-find_path(PXR_INCLUDE_DIR # Set variable PXR_INCLUDE_DIR
+find_path(PXR_INCLUDE_DIRS # Set variable PXR_INCLUDE_DIRS
           pxr/pxr.h       # Find a path with pxr.h
           REQUIRED
 )
-set(PXR_INCLUDE_DIRS "${PXR_INCLUDE_DIR}")
-cmake_path(GET PXR_INCLUDE_DIR PARENT_PATH PXR_INSTALL_PREFIX)
-set(PXR_LIBRARY_DIR "${PXR_INSTALL_PREFIX}/lib")
-set(PXR_LIBRARY_DIRS "${PXR_LIBRARY_DIR}")
+cmake_path(GET PXR_INCLUDE_DIRS PARENT_PATH PXR_INSTALL_PREFIX)
+set(PXR_LIBRARY_DIRS "${PXR_INSTALL_PREFIX}/lib")
 
 # Configure all USD targets
 set(USD_COMPOMPONENTS arch tf gf js trace work plug vt ar kind sdf ndr sdr pcp usd usdGeom usdVol usdMedia usdShade usdLux usdProc usdRender usdHydra usdRi usdSkel usdUI usdUtils usdPhysics garch hf hio cameraUtil pxOsd glf hgi hgiGL hgiInterop hd hdGp hdsi hdSt hdx usdImaging usdImagingGL usdProcImaging usdRiImaging usdSkelImaging usdVolImaging usdAppUtils)
 
 if(Vulkan_shaderc_combined_FOUND)
   list(APPEND USD_COMPOMPONENTS "hgiVulkan")
+endif()
+
+if(APPLE)
+  list(APPEND USD_COMPOMPONENTS "hgiMetal")
 endif()
 
 if(USD_COMPOMPONENTS_USDVIEW)
@@ -97,6 +121,13 @@ foreach(_comp ${USD_COMPOMPONENTS})
       )
       unset(USD_${_comp}_LIBRARY_DIR_RELEASE)
       unset(USD_${_comp}_DLL_RELEASE)
+    elseif(APPLE)
+      find_file(USD_${_comp}_LIBRARY_RELEASE usd_${_comp}.dylib REQUIRED
+        PATHS "${PXR_LIBRARY_DIRS}"
+      )
+      set_target_properties(${_comp} PROPERTIES
+        IMPORTED_LOCATION_RELEASE "${USD_${_comp}_LIBRARY_RELEASE}"
+      )
     else() # linux
       cmake_path(GET USD_${_comp}_LIBRARY_RELEASE FILENAME USD_${_comp}_SO)
       set_target_properties(${_comp} PROPERTIES
@@ -126,6 +157,13 @@ foreach(_comp ${USD_COMPOMPONENTS})
       )
       unset(USD_${_comp}_LIBRARY_DIR_DEBUG)
       unset(USD_${_comp}_DLL_DEBUG)
+    elseif(APPLE)
+      find_file(USD_${_comp}_LIBRARY_DEBUG usd_${_comp}d.dylib REQUIRED
+        PATHS "${PXR_LIBRARY_DIRS}"
+      )
+      set_target_properties(${_comp} PROPERTIES
+      IMPORTED_LOCATION_DEBUG "${USD_${_comp}_LIBRARY_DEBUG}"
+      )
     else() # linux
       cmake_path(GET USD_${_comp}_LIBRARY_DEBUG FILENAME USD_${_comp}_SO)
       set_target_properties(${_comp} PROPERTIES
@@ -395,20 +433,26 @@ if(USD_hgiVulkan_LIBRARY_RELEASE OR USD_hgiVulkan_LIBRARY_DEBUG)
     INTERFACE_LINK_LIBRARIES "arch;hgi;tf;trace;Vulkan::Vulkan;Vulkan::shaderc_combined"
   )
 endif()
+if(USD_hgiMetal_LIBRARY_RELEASE OR USD_hgiMetal_LIBRARY_DEBUG)
+  set_target_properties(hgiMetal PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${PXR_INCLUDE_DIRS}"
+    INTERFACE_LINK_LIBRARIES "arch;hgi;tf;trace;-framework Metal;-framework AppKit"
+  )
+endif()
 set_target_properties(hgiInterop PROPERTIES
   INTERFACE_COMPILE_DEFINITIONS "PXR_PYTHON_ENABLED=1"
   INTERFACE_INCLUDE_DIRECTORIES "${PXR_INCLUDE_DIRS}"
 )
+set(HGI_INTEROP_LIBRARIES "gf;tf;hgi;vt;garch")
 if (USD_hgiVulkan_LIBRARY_RELEASE OR USD_hgiVulkan_LIBRARY_DEBUG)
-  set_target_properties(hgiInterop PROPERTIES
-    INTERFACE_LINK_LIBRARIES "gf;tf;hgi;vt;garch;hgiVulkan"
-  )
-else()
-  set_target_properties(hgiInterop PROPERTIES
-    INTERFACE_LINK_LIBRARIES "gf;tf;hgi;vt;garch"
-  )
+  set(HGI_INTEROP_LIBRARIES "${HGI_INTEROP_LIBRARIES};hgiVulkan")
 endif()
-
+if (USD_hgiMetal_LIBRARY_RELEASE OR USD_hgiMetal_LIBRARY_DEBUG)
+  set(HGI_INTEROP_LIBRARIES "${HGI_INTEROP_LIBRARIES};hgiMetal;-framework CoreVideo")
+endif()
+set_target_properties(hgiInterop PROPERTIES
+  INTERFACE_LINK_LIBRARIES "${HGI_INTEROP_LIBRARIES}"
+)
 
 include(FindPackageHandleStandardArgs)
 # handle the QUIETLY and REQUIRED arguments and set pxr_FOUND to TRUE
@@ -421,10 +465,8 @@ find_package_handle_standard_args(pxr
 
 mark_as_advanced(
     PXR_INCLUDE_DIRS
-    PXR_INCLUDE_DIR
     PXR_LIBRARIES
     PXR_LIBRARY_DIRS
-    PXR_LIBRARY_DIR
     USD_LIBRARIES_RELEASE
     USD_LIBRARIES_DEBUG
 )

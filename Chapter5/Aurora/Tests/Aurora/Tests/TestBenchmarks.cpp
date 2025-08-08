@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -41,7 +41,9 @@ TEST_P(BenchmarkTest, TestBenchmarkDefault)
 
     // Create the default renderer with 1k by 1k frame buffer.
     IRendererPtr pRenderer = createDefaultRenderer(1024, 1024);
-
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
     // Create default scene
     Aurora::IScenePtr pScene = createDefaultScene();
 

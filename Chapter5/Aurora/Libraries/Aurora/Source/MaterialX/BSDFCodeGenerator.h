@@ -1,20 +1,23 @@
+// Copyright 2025 Autodesk, Inc.
 //
-// Copyright 2023 by Autodesk, Inc.  All rights reserved.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// This computer source code and related instructions and comments
-// are the unpublished confidential and proprietary information of
-// Autodesk, Inc. and are protected under applicable copyright and
-// trade secret law.  They may not be disclosed to, copied or used
-// by any third party without the prior written consent of Autodesk, Inc.
+// http://www.apache.org/licenses/LICENSE-2.0
 //
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 #pragma once
 
 #include "UniformBuffer.h"
 #include <MaterialXCore/Generated.h>
 
 // Forward declare MaterialX types.
-namespace MaterialX_v1_38_10
-{
+MATERIALX_NAMESPACE_BEGIN
 class Document;
 class FileSearchPath;
 class ShaderGenerator;
@@ -26,7 +29,7 @@ class UnitConverterRegistry;
 class UnitSystem;
 class ShaderNode;
 class TypeDesc;
-} // namespace MaterialX_v1_38_10
+MATERIALX_NAMESPACE_END
 
 #include "Properties.h"
 

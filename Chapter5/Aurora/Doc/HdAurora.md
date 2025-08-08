@@ -28,8 +28,9 @@ cmake --build Build --config Release
 ```
 Before running **usdview** with **HdAurora**, you need to configure the run environment with:
 ```
-set PYTHONPATH=%AURORA_ROOT%\Build\bin\Release\python
-set PATH=%PATH%;%AURORA_ROOT%\Build\bin\Release
+set PXR_MTLX_STDLIB_SEARCH_PATHS=%AURORA_ROOT%\Build\bin\<config>\MaterialX\libraries
+set PYTHONPATH=<aurora_externals_root>\USD\lib\python;%PYTHONPATH%
+set PATH=%AURORA_ROOT%\Build\bin\<config>;%PATH%
 ```
 To render the [Autodesk Telescope USD model](https://drive.google.com/file/d/1RM09qDOGcRinLJTbXCsiRfQrHmKA-1aN/view?usp=share_link) with **HdAurora**, simply extract the ZIP file into *ASSET_DIR*, and run the following command.
 ```
@@ -52,3 +53,6 @@ cd ..\USD\bin
 usdview %ASSET_DIR%\AutodeskTelescope.usda --renderer=Aurora
 ```
 
+## Known Issues
+
+- Currently, UsdView cannot be used with the embedded debug configuration USD.

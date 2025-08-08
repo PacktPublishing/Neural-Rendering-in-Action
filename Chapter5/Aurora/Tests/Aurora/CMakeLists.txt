@@ -23,6 +23,13 @@ set(TEST_FILES
     "Tests/TestRenderer.cpp"
 )
 
+if (APPLE)
+    set(CMAKE_XCODE_GENERATE_SCHEME YES)
+    set(XCODE_DEBUGGING_ENV 
+        ${XCODE_DEBUGGING_ENV}
+        HGIMETAL_DEBUG=1)
+endif()
+
 # Add test executable with all source files.
 add_executable(${PROJECT_NAME}
     ${HELPER_FILES}
@@ -34,6 +41,9 @@ add_executable(${PROJECT_NAME}
 source_group("Helpers" FILES ${HELPER_FILES})
 source_group("Tests" FILES ${TEST_FILES})
 
+if (NOT PNG_LIBRARY_DIRS)
+    set(PNG_LIBRARY_DIRS "${PNG_ROOT}/lib")
+endif()
 # Set custom output properties.
 set_target_properties(${PROJECT_NAME} PROPERTIES
 	FOLDER "Tests"
@@ -41,6 +51,9 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${LIBRARY_OUTPUT_DIR}"
     ARCHIVE_OUTPUT_DIRECTORY "${LIBRARY_OUTPUT_DIR}"
     PDB_OUTPUT_DIRECTORY "${RUNTIME_OUTPUT_DIR}"
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH_USE_LINK_PATH TRUE
+    INSTALL_RPATH "${PNG_LIBRARY_DIRS};${TBB_LIBRARY_DIR};${PXR_LIBRARY_DIRS};${INSTALL_RPATH}"
     VS_DEBUGGER_WORKING_DIRECTORY "${RUNTIME_OUTPUT_DIR}"
     VS_DEBUGGER_ENVIRONMENT "${VS_DEBUGGING_ENV}"
     XCODE_SCHEME_ENVIRONMENT "${XCODE_DEBUGGING_ENV}")
@@ -54,8 +67,8 @@ PRIVATE
     PNG::PNG
     stb::stb
     OpenImageIO::OpenImageIO
-    pxr::usd
-    pxr::hgi
+    usd
+    hgi
     Foundation
     Aurora
 )
@@ -88,9 +101,7 @@ if(WIN32)
 endif()
 
 # Run gtest discover tests function.
-if(RUN_TESTS_FROM_PROJECT)
-    gtest_discover_tests(${PROJECT_NAME}
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${RUNTIME_OUTPUT_DIR}"
-    )
-endif()
+gtest_discover_tests(${PROJECT_NAME}
+   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+   PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${RUNTIME_OUTPUT_DIR}"
+)

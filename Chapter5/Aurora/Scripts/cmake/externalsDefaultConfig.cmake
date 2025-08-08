@@ -129,6 +129,14 @@ endif()
 list(APPEND AURORA_DEPENDENCIES "${GTest_ROOT}")
 # find_package_verbose(GTest)
 
+if(WIN32)
+    if(NOT DEFINED DXC_ROOT)
+        set(DXC_ROOT "${EXTERNALS_ROOT}/DXC")
+    endif()
+    list(APPEND AURORA_DEPENDENCIES "${DXC_ROOT}")
+endif()
+# find_package_verbose(DXC)
+
 # If you want to use you own build of certain external library, simply set <pkg>_ROOT
 # to guide find_package() to locate your own build. External libraries required directly
 # and indirectly by Aurora are:

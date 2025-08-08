@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,6 +29,9 @@ using namespace std;
 #pragma clang diagnostic ignored "-Wignored-attributes"
 #endif
 
+// Include OpenImageIO compatibility before OpenImageIO headers
+#include "../../Libraries/ImageProcessingResolver/OpenImageIOCompat.h"
+
 #pragma warning(push)
 #pragma warning(disable : 4459) // disable simd.h warning about 'cout' declaration.
 #pragma warning(disable : 4566) // disable core.h warning about "micro" char type.
@@ -36,6 +39,7 @@ using namespace std;
 #pragma warning(disable : 4244) // disable simd.h warning about type conversion.
 #pragma warning(disable : 4456) // disable farmhash.h warning about hiding local declaration.
 #pragma warning(disable : 4267) // disable farmhash.h warning about type conversion.
+#pragma warning(disable : 4996) // disable format.h warning about non-Standard extensions.
 #include <OpenImageIO/imagebuf.h>
 #include <OpenImageIO/imagebufalgo.h>
 #include <OpenImageIO/imageio.h>

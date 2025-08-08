@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -151,7 +151,7 @@ float3 sampleEnvironment(Environment environment, float2 random, out float3 L, o
         // Select an alias map entry at random, corresponding to a texel in the environment texture.
         // If the entry's probability does not exceed another random value, use the entry's alias
         // instead, corresponding to a different texel.
-        uint index       = min(count * random[0], count - 1);
+        uint index       = min(uint(count * random[0]), count - 1);
         AliasEntry entry = environment.aliasMap[index];
         if (entry.probability < random[1])
         {

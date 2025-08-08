@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -100,6 +100,7 @@ ShadingData shadingDataFromInstanceResult(InstanceRayPayload result)
  
     // Generate bitangent from normal and tangent.
     shading.bitangent = computeBitangent(shading.normal, shading.tangent);
+    shading.bitangentWorld = shading.bitangent; // Keep MaterialX (>= 1.39.x) alias in sync
 
     return shading;
 }

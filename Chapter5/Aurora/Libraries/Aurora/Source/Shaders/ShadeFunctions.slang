@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,6 +38,7 @@ float3 shadeDirectionalLight(float3 dir, float4 colorAndIntensity, float cosRadi
     float3 bsdfAndCosine = evaluateMaterial(material, shading, V, L);
     if (isBlack(bsdfAndCosine))
     {
+        shadowRayDirection = float3(0.f);
         return BLACK;
     }
 
@@ -184,7 +185,7 @@ void shadeEnvironmentLightMIS(Environment environment, Material material,
 // Sample the BSDF to generate the next indirect ray in the path, and set output parameters for the next ray's origin, direction, and color.
 // Return the ID of the lobe that was sampled.
 int setupIndirectLightRay(Material material, ShadingData shading, float3 V, int depth,
-    int maxDepth, inout Random rng, out float3 indirectRayDirec, out float3 indirectRayOrigin, out float3 indirectColorOut)
+    int maxDepth, inout Random rng, inout float3 indirectRayDirec, inout float3 indirectRayOrigin, inout float3 indirectColorOut)
 {
     // Generate random numbers for sampling.
     float2 random = random2D(rng);

@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -76,15 +76,15 @@ static const string nodeGraphImageTemplate = R"(
 
 static const string nodeGraphNormalMapTemplate = R"(
   <nodegraph name="NG%s">
-    <image name="%s_image" type="vector3">
+    <image name="%s" type="vector3">
       <parameter name="file" type="filename" value="" />
       <parameter name="uaddressmode" type="string" value="periodic" />
       <parameter name="vaddressmode" type="string" value="periodic" />
     </image>
-    <normalmap name="%s" type="vector3">
-      <input name="in" type="vector3" nodename="%s_image" />
+    <normalmap name="%s_image" type="vector3">
+      <input name="in" type="vector3" nodename="%s" />
     </normalmap>
-    <output name="out1" type="vector3" nodename="%s" />
+    <output name="out1" type="vector3" nodename="%s_image" />
   </nodegraph>)";
 
 static const string materialDefinitionTemplate = R"(

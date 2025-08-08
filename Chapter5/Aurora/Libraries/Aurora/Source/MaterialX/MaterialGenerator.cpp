@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,6 +38,22 @@ static string GLSLToHLSL(const string& glslStr)
     // Replace GLSL float array initializers.
     hlslStr = regex_replace(hlslStr, regex("float\\[.*\\]\\((.+)\\);\\n"), "{$1};\n");
 
+    // Replace cond ? a : b with expanded if-else because the ternary operator (a ? b : c) for
+    // vector or matrix types is deprecated in HLSL.
+    // NOTE:
+    // 1) select(cond, a, b) in nested methods will result in Slang emitting error.
+    // 2) To avoid potential issues with the regex, we perform a conservative replacement (i.e.
+    // only replace the ternary operator in an assignment). The root cause of the issue is that
+    // the MaterialX SDK generates glsl code. We may need to either support HLSL or Slang in the
+    // MaterialX SDK, or find a better way to convert the code to HLSL.
+    hlslStr =
+        regex_replace(hlslStr, regex(R"(([^;=\n]+)\s*=\s*([^\?;]+)\?\s*([^\:;]+)\s*:\s*([^;]+);)"),
+            R"(
+if (all($2)) {
+    $1 = $3;
+} else {
+    $1 = $4;
+})");
     return hlslStr;
 }
 
@@ -162,14 +178,14 @@ shared_ptr<MaterialDefinition> MaterialGenerator::generate(const string& documen
 
     // Create set of the generated BSDF inputs.
     set<string> bsdfInputs;
-    for (int i = 0; i < res.bsdfInputs.size(); i++)
+    for (size_t i = 0; i < res.bsdfInputs.size(); i++)
     {
         bsdfInputs.insert(res.bsdfInputs[i].name);
     }
 
     // Create set of the textures used by the generated setup function.
-    map<string, int> textures;
-    for (int i = 0; i < res.textures.size(); i++)
+    map<string, size_t> textures;
+    for (size_t i = 0; i < res.textures.size(); i++)
     {
         textures[res.textures[i].image] = i;
     }
@@ -181,13 +197,15 @@ shared_ptr<MaterialDefinition> MaterialGenerator::generate(const string& documen
     string materialName = "MaterialX_" + Foundation::sHash(res.functionHash);
 
     string functionInterface = "Material evaluateMaterial_" + materialName +
-        "(ShadingData shading, int headerOffset, out float3 "
+        "(ShadingData shading, int headerOffset, inout float3 "
         "materialNormal, out bool "
         "isGeneratedNormal)";
 
     // Append the material accessor functions used to read material properties from
     // ByteAddressBuffer.
     UniformBuffer mtlConstantsBuffer(res.materialProperties, res.materialPropertyDefaults);
+    generatedMtlxSetupFunction +=
+        "#pragma warning (disable : 30081) // Implicit conversion from 'int' to 'bool'\n\n";
     generatedMtlxSetupFunction += "struct " + res.materialStructName + "\n";
     generatedMtlxSetupFunction += mtlConstantsBuffer.generateHLSLStruct();
     generatedMtlxSetupFunction += ";\n\n";
@@ -205,14 +223,14 @@ shared_ptr<MaterialDefinition> MaterialGenerator::generate(const string& documen
 
     // Fill in the isGeneratedNormal output (set to true if the code-generated setup function
     // generated a normal)
-    generatedMtlxSetupFunction += "\tisGeneratedNormal = " + to_string(modifiedNormal) + ";\n";
+    generatedMtlxSetupFunction += "\tisGeneratedNormal =" + to_string(modifiedNormal) + ";\n";
 
     // Reset material to default values.
     generatedMtlxSetupFunction += "\tMaterial material = defaultMaterial();\n";
 
     // Create sampler structs for each of the textures in the materialX material.
     vector<string> samplerNames;
-    for (int i = 0; i < res.textureDefaults.size(); i++)
+    for (size_t i = 0; i < res.textureDefaults.size(); i++)
     {
         string samplerName = "sampler" + to_string(i);
         // Create sampler from Nth texture and sampler.
@@ -229,7 +247,7 @@ shared_ptr<MaterialDefinition> MaterialGenerator::generate(const string& documen
     generatedMtlxSetupFunction += "\t" + res.materialStructName + " setupMaterialStruct;\n";
 
     // Fill struct using the byte address buffer accessors.
-    for (int i = 0; i < res.materialProperties.size(); i++)
+    for (size_t i = 0; i < res.materialProperties.size(); i++)
     {
         generatedMtlxSetupFunction += "\tsetupMaterialStruct." +
             res.materialProperties[i].variableName + " = " + res.materialStructName + "_" +
@@ -244,7 +262,7 @@ shared_ptr<MaterialDefinition> MaterialGenerator::generate(const string& documen
     generatedMtlxSetupFunction += "setupMaterialStruct";
 
     // Add code for all the texture arguments.
-    for (int i = 0; i < samplerNames.size(); i++)
+    for (size_t i = 0; i < samplerNames.size(); i++)
     {
         // Add texture name.
         generatedMtlxSetupFunction += ",\n";
@@ -264,7 +282,7 @@ shared_ptr<MaterialDefinition> MaterialGenerator::generate(const string& documen
     }
 
     // Add the BSDF inputs that will be output from setup function.
-    for (int i = 0; i < res.bsdfInputs.size(); i++)
+    for (size_t i = 0; i < res.bsdfInputs.size(); i++)
     {
         generatedMtlxSetupFunction += ",\n";
         if (res.bsdfInputs[i].name.compare("normal") == 0)

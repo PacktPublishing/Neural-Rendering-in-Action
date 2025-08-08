@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -43,7 +43,11 @@ Environment prepareEnvironmentValues()
     Environment values;
     values.constants         = gEnvironmentConstants;
     values.backgroundTexture = gEnvironmentBackgroundTexture;
+#if DIRECTX
     values.sampler           = gSamplerArray[0];
+#else
+    values.sampler           = gDefaultSampler;
+#endif
     values.lightTexture      = gEnvironmentLightTexture;
 #if DIRECTX
     values.aliasMap = gEnvironmentAliasMap;

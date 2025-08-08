@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -292,16 +292,19 @@ private:
 // Convenience macro to render with renderAndCheckBaselineImage and ensure baseline image result is
 // "Passed"
 #define ASSERT_BASELINE_IMAGE_PASSES(_name)                                                        \
-    ASSERT_STREQ(renderAndCheckBaselineImage(_name).toString().c_str(), "Passed")                  \
+    EXPECT_STREQ(renderAndCheckBaselineImage(_name).toString().c_str(), "Passed")                  \
         << rendererDescription()
 
 // Convenience macro to render with renderAndCheckBaselineImage with a sub-folder and ensure
 // baseline image result is "Passed"
 #define ASSERT_BASELINE_IMAGE_PASSES_IN_FOLDER(_name, _folder)                                     \
-    ASSERT_STREQ(renderAndCheckBaselineImage(_name, _folder).toString().c_str(), "Passed")         \
+    EXPECT_STREQ(renderAndCheckBaselineImage(_name, _folder).toString().c_str(), "Passed")         \
         << rendererDescription()
 
 // The renderer type strings to pass to INSTANTIATE_TEST_SUITE_P
-#define TEST_SUITE_RENDERER_TYPES() testing::Values("DirectX", "HGI")
-
+#if defined(WIN32)
+#define TEST_SUITE_RENDERER_TYPES() testing::Values("HGI", "DirectX")
+#else
+#define TEST_SUITE_RENDERER_TYPES() testing::Values("HGI")
+#endif
 } // namespace TestHelpers

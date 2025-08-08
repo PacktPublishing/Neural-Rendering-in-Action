@@ -24,7 +24,7 @@ Below you can learn about features, system requirements, how to build Aurora, ho
 
 ### Operating System
 
-Aurora is officially supported on **Windows 10** or **Ubuntu 20.04**. Windows 11 and other Linux distributions may work, but are not yet supported.
+Aurora is officially supported on **Windows 11**, **MacOS 15.5** and **Ubuntu 24.04**. Windows 10/other MacOS versions/other Linux distributions may work, but are not guaranteed.
 
 To run Aurora, the latest GPU drivers from [NVIDIA](https://www.nvidia.com/download/index.aspx), [AMD](https://www.amd.com/en/support), or [Intel](https://www.intel.com/content/www/us/en/download-center/home.html) are recommended as ray tracing API support is being actively improved. No other software is required to run Aurora.
 
@@ -34,7 +34,7 @@ Software required for building Aurora can be found in [the build instructions](D
 
 ### GPU
 
-Aurora requires a GPU with hardware ray tracing support, either through **DirectX Raytracing** (DXR) on Windows, or **Vulkan Ray Tracing** on Windows or Linux. These include, but are not limited to:
+Aurora requires a GPU with hardware ray tracing support, either through **DirectX Raytracing** (DXR) on Windows, or **Hgi Ray Tracing** on Windows/MacOS/Linux. These include, but are not limited to:
 
 - **NVIDIA GPUs with native ray tracing support** include any GPU with "RTX" in the brand name, including mobile GPUs. This includes:
   - The GeForce RTX series, such as the GeForce RTX 2060.
@@ -50,8 +50,9 @@ Aurora requires a GPU with hardware ray tracing support, either through **Direct
 - **Intel GPUs with native ray tracing support** include any GPU with “Xe” architecture and DX12 support. This includes:
   - The Intel™ Arc® Pro A-series for workstations, such as the Intel Arc Pro A40 and Intel Arc Pro A50.
   - The Intel™ Arc® A-series, such as the Intel Arc A380 and Intel Arc A770.
+- **Apple silicon M1 and above**
 
-See [the build instructions](Doc/Build.md) for information on enabling support for DirectX Raytracing or Vulkan Ray Tracing.
+See [the build instructions](Doc/Build.md) for information on enabling support for DirectX Raytracing or Hgi Ray Tracing.
 
 NOTE: At this time Vulkan is supported on NVIDIA GPUs only.
 
@@ -72,14 +73,28 @@ cmake --build Build --config Release
 cd Build\bin\Release
 Plasma.exe
 ```
-#### Linux (Ubuntu 20.04)
+
+#### MacOS
+
+Run the following on the macOS terminal. Xcode and python3 are required.
+
+```
+python3 Scripts/installExternals.py ../AuroraExternals
+cmake -S . -B Build -G Xcode
+xcodebuild -project Build/Aurora.xcodeproj -target Plasma -configuration Release
+cd Build/bin/Release
+open ./Plasma.app
+```
+
+#### Linux (Ubuntu 24.04)
 ```
 python Scripts/installExternals.py ../AuroraExternals
 cmake -S . -B Build
 cmake --build Build
 cd Build/bin/Release
-./Plasma --output {OUTPUT_IMAGE_FILE.png} --scene {INPUT_SCENE_FILE.obj} --renderer hgi
+./Plasma --output {OUTPUT_IMAGE_FILE.png} --scene {INPUT_SCENE_FILE.obj}
 ```
+
 ## Running Aurora
 
 Aurora can be exercised in three ways:

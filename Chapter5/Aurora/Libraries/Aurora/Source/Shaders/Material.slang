@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -92,7 +92,7 @@ Material defaultMaterial()
     material.emission             = 0.0;
     material.emissionColor        = WHITE;
     material.opacity              = 1.0;
-    material.thinWalled           = 0;
+    material.thinWalled           = false;
 
     return material;
 }

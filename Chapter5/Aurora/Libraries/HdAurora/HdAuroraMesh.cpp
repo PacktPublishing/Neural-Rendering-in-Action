@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -106,16 +106,21 @@ void HdAuroraMesh::RebuildAuroraInstances(HdSceneDelegate* delegate)
     }
 
     // Create vertex data object, that will exist until the renderer has read the vertex data.
-    _pVertexData           = make_unique<HdAuroraMeshVertexData>();
-    _pVertexData->points   = delegate->Get(id, HdTokens->points).Get<VtVec3fArray>();
-    _pVertexData->normals  = delegate->Get(id, HdTokens->normals).Get<VtVec3fArray>();
-    _pVertexData->tangents = delegate->Get(id, pxr::TfToken("tangents")).Get<VtVec3fArray>();
-    _pVertexData->uvs      = delegate->Get(id, pxr::TfToken("map1")).Get<VtVec2fArray>();
+    _pVertexData          = make_unique<HdAuroraMeshVertexData>();
+    _pVertexData->points  = delegate->Get(id, HdTokens->points).Get<VtVec3fArray>();
+    _pVertexData->normals = delegate->Get(id, HdTokens->normals).Get<VtVec3fArray>();
+    if (auto&& tangentValue = delegate->Get(id, pxr::TfToken("tangents")); !tangentValue.IsEmpty())
+        _pVertexData->tangents = tangentValue.Get<VtVec3fArray>();
+    if (auto&& uvValue = delegate->Get(id, pxr::TfToken("map1")); !uvValue.IsEmpty())
+        _pVertexData->uvs = uvValue.Get<VtVec2fArray>();
 
     // Attempt to get UVs using "st" token if "map1" fails.  Both can be used in different
     // circumstances.
     if (_pVertexData->uvs.size() == 0)
-        _pVertexData->uvs = delegate->Get(id, pxr::TfToken("st")).Get<VtVec2fArray>();
+    {
+        if (auto&& stValue = delegate->Get(id, pxr::TfToken("st")); !stValue.IsEmpty())
+            _pVertexData->uvs = stValue.Get<VtVec2fArray>();
+    }
 
     // Sample code for extracting extra uv set
     // The name for the base uv set is st, other uv sets (st0, st1, etc.)
@@ -379,7 +384,7 @@ void HdAuroraMesh::RebuildAuroraInstances(HdSceneDelegate* delegate)
                                     size_t vertexCount, size_t firstIndex, size_t indexCount) {
         // Sanity check, ensure we are not doing a partial update (not actually implemented yet)
         AU_ASSERT(firstVertex == 0, "Partial update not supported");
-        // Ensure we still have vertex data, if not then this goemetry has been activated,
+        // Ensure we still have vertex data, if not then this geometry has been activated,
         // deactivated and then reactivated.
         // TODO: Support this case.
         AU_ASSERT(_pVertexData, "No vertex data for mesh %s, reactivation not supported.",
@@ -458,7 +463,7 @@ void HdAuroraMesh::RebuildAuroraInstances(HdSceneDelegate* delegate)
     };
 
     // Setup completion callback to release data when vertex data has been read.
-    // This will be called when the render is done acccesing vertex attributes.
+    // This will be called when the render is done accessing vertex attributes.
     geomDesc.attributeUpdateComplete = [this](const Aurora::AttributeDataMap&, size_t, size_t,
                                            size_t, size_t) { _pVertexData.reset(); };
 
@@ -474,7 +479,7 @@ void HdAuroraMesh::RebuildAuroraInstances(HdSceneDelegate* delegate)
         vector<Aurora::Path> geometryLayerPaths;
         if (!materialLayersVal.IsEmpty())
         {
-            auto geomtryLayerUVsVal = delegate->Get(GetId(), HdAuroraTokens::kMeshGeometryLayerUVs);
+            auto geometryLayerUVsVal = delegate->Get(GetId(), HdAuroraTokens::kMeshGeometryLayerUVs);
             // Get the Hydra ID for material layer.
             auto layerArray = materialLayersVal.Get<pxr::SdfPathVector>();
             _layerUVData    = vector<VtVec2fArray>(layerArray.size());
@@ -489,7 +494,7 @@ void HdAuroraMesh::RebuildAuroraInstances(HdSceneDelegate* delegate)
                 Aurora::Path geomLayerPath = "";
 
                 // Value passed to Hydra is primvar name.
-                auto uvPrimVarArray = geomtryLayerUVsVal.Get<pxr::VtTokenArray>();
+                auto uvPrimVarArray = geometryLayerUVsVal.Get<pxr::VtTokenArray>();
                 if (uvPrimVarArray.size() > layerIdx)
                 {
                     // UV primvar name.
@@ -550,7 +555,7 @@ void HdAuroraMesh::RebuildAuroraInstances(HdSceneDelegate* delegate)
                                 };
 
                             // Setup completion callback to release data when UV data has been
-                            // read. This will be called when the render is done acccesing
+                            // read. This will be called when the render is done accessing
                             // vertex attributes.
                             layerGeomDesc.attributeUpdateComplete =
                                 [this, layerIdx](const Aurora::AttributeDataMap&, size_t, size_t,

@@ -1,4 +1,4 @@
-// Copyright 2022 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,9 +16,11 @@
 #include "HGIEnvironment.h"
 #include "HGIGeometry.h"
 #include "HGIImage.h"
+#include "HGISampler.h"
 #include "HGILight.h"
 #include "HGIMaterial.h"
 #include "SceneBase.h"
+#include "AliasMap.h"
 
 BEGIN_AURORA
 
@@ -57,7 +59,12 @@ public:
 private:
     shared_ptr<HGIGeometry> _pGeometry;
     shared_ptr<HGIMaterial> _pMaterial;
-    [[maybe_unused]] HGIRenderer* _pRenderer;
+// Disable warning "attributes" for GCC to fix build error "'maybe_unused' attribute ignored".
+// TODO: This might be a bug of GCC. Need to review it when upgrading GCC to a newer version.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wattributes"
+    [[maybe_unused]] HGIRenderer* _pRenderer = nullptr;
+#pragma GCC diagnostic pop
     pxr::GfMatrix4f _transform;
 };
 
@@ -69,7 +76,7 @@ struct InstanceShaderRecord
     // Geometry data.
     HGIGeometryBuffers geometry;
 
-    // Index into material array.
+    // ADDRESS into material array.
     uint64_t material;
 
     // Index into texture sampler array for material's textures.
@@ -78,7 +85,9 @@ struct InstanceShaderRecord
     int specularRoughnessTextureIndex = -1;
     int normalTextureIndex            = -1;
     int opacityTextureIndex           = -1;
-
+#ifdef __APPLE__
+    int emissionTextureIndex          = -1;
+#endif
     // Geometry flags.
     unsigned int hasNormals   = true;
     unsigned int hasTangents  = false;
@@ -114,6 +123,7 @@ public:
     pxr::HgiAccelerationStructureHandle tlas() { return _tlas->handle(); }
 
     pxr::HgiResourceBindingsHandle resourceBindings() { return _resBindings->handle(); }
+    const pxr::HgiBufferHandle& instanceDataUbo() { return _instanceDataUbo->handle(); }
 
     IInstancePtr addInstancePointer(const Path& /* path*/, const IGeometryPtr& pGeom,
         const IMaterialPtr& pMaterial, const mat4& transform,
@@ -121,23 +131,26 @@ public:
     ILightPtr addLightPointer(const string& lightType) override;
 
 private:
+    int findTexture(const string& name) const;
+    
     map<int, weak_ptr<HGILight>> _distantLights;
     int _currentLightIndex = 0;
 
     HGIRenderer* _pRenderer = nullptr;
-    shared_ptr<Transpiler> _transpiler;
     HgiRayTracingPipelineHandleWrapper::Pointer _rayTracingPipeline;
     HgiAccelerationStructureHandleWrapper::Pointer _tlas;
     HgiAccelerationStructureGeometryHandleWrapper::Pointer _tlasGeom;
     vector<InstanceData> _lstInstances;
+    HgiBufferHandleWrapper::Pointer _instanceDataUbo;
     vector<shared_ptr<HGIImage>> _lstImages;
+    vector<shared_ptr<HGISampler>> _lstSamplers;
+    map<string, int> _imageNameLookup;
     HgiResourceBindingsHandleWrapper::Pointer _resBindings;
     HgiTextureHandleWrapper::Pointer _pDefaultImage;
-    HgiShaderFunctionHandleWrapper::Pointer _backgroundMissShaderFunc;
     HgiShaderFunctionHandleWrapper::Pointer _rayGenShaderFunc;
     HgiShaderFunctionHandleWrapper::Pointer _shadowMissShaderFunc;
-    HgiShaderFunctionHandleWrapper::Pointer _radianceMissShaderFunc;
     HgiShaderFunctionHandleWrapper::Pointer _closestHitShaderFunc;
+    HgiShaderFunctionHandleWrapper::Pointer _anyHitShaderFunc;
 };
 using HGIScenePtr = std::shared_ptr<HGIScene>;
 

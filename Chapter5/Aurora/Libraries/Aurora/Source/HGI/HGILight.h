@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ public:
     /*** Lifetime Management ***/
 
     HGILight(HGIScene* pScene, const string& lightType, int index);
-    ~HGILight() {};
+    ~HGILight() { _pScene = nullptr; };
 
     /*** Functions ***/
     FixedValues& values() override { return *this; }

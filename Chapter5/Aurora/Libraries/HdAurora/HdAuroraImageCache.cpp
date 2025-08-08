@@ -1,4 +1,4 @@
-// Copyright 2024 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -61,9 +61,10 @@ Aurora::Path HdAuroraImageCache::acquireImage(
         imageData.format  = image->GetFormat();
 
         // NOTE: Multiplying int values may exceed INT_MAX. Cast to size_t for security.
-        const size_t widthSizeT  = image->GetWidth();
-        const size_t heightSizeT = image->GetHeight();
-        const size_t bppSizeT    = image->GetBytesPerPixel();
+        const size_t widthSizeT      = image->GetWidth();
+        const size_t heightSizeT     = image->GetHeight();
+        const size_t totalPixelSizeT = widthSizeT * heightSizeT;
+        const size_t bppSizeT        = image->GetBytesPerPixel();
         bool paddingRequired =
             hioFormat == HioFormatUNorm8Vec3srgb || hioFormat == HioFormatUNorm8Vec3;
 
@@ -78,14 +79,14 @@ Aurora::Path HdAuroraImageCache::acquireImage(
                                                              : HioFormatUNorm8Vec4;
 
             const size_t newPixelSize = 4;
-            dataOut.bufferSize        = widthSizeT * heightSizeT * newPixelSize;
-            pUnpaddedPixels.reset(new uint8_t[widthSizeT * heightSizeT * bppSizeT]);
+            dataOut.bufferSize        = totalPixelSizeT * newPixelSize;
+            pUnpaddedPixels.reset(new uint8_t[totalPixelSizeT * bppSizeT]);
             imageData.data = pUnpaddedPixels.get();
             pPixelData     = static_cast<uint8_t*>(alloc(dataOut.bufferSize));
         }
         else
         {
-            dataOut.bufferSize = widthSizeT * heightSizeT * bppSizeT;
+            dataOut.bufferSize = totalPixelSizeT * bppSizeT;
             pPixelData         = static_cast<uint8_t*>(alloc(dataOut.bufferSize));
             imageData.data     = pPixelData;
         }
@@ -108,11 +109,11 @@ Aurora::Path HdAuroraImageCache::acquireImage(
         // Pad to RGBA if required.
         if (paddingRequired)
         {
-            for (size_t idx = 0; idx < image->GetWidth() * image->GetWidth(); idx++)
+            for (size_t idx = 0; idx < totalPixelSizeT; idx++)
             {
-                pPixelData[idx * 4 + 0] = pUnpaddedPixels[idx * 3 + 0];
-                pPixelData[idx * 4 + 1] = pUnpaddedPixels[idx * 3 + 1];
-                pPixelData[idx * 4 + 2] = pUnpaddedPixels[idx * 3 + 2];
+                pPixelData[idx * 4 + 0] = pUnpaddedPixels[bppSizeT * bppSizeT + 0];
+                pPixelData[idx * 4 + 1] = bppSizeT > 1 ? pUnpaddedPixels[idx * bppSizeT + 1] : 0xFF;
+                pPixelData[idx * 4 + 2] = bppSizeT > 2 ? pUnpaddedPixels[idx * bppSizeT + 2] : 0xFF;
                 pPixelData[idx * 4 + 3] = 0xFF;
             }
         }

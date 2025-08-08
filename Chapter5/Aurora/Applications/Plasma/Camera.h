@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ public:
     vec3 forwardDir() const { return normalize(_target - _eye); }
     vec3 rightDir() const { return cross(forwardDir(), _up); }
     float targetDistance() const { return length(_target - _eye); }
-    float aspectRatio() const { return static_cast<float>(_dimensions.x) / _dimensions.y; }
+    float aspectRatio() const { return _aspectRatio; }
     const mat4& viewMatrix();
     const mat4& projMatrix();
     const ivec2& dimensions() const { return _dimensions; }
@@ -44,20 +44,29 @@ public:
     void setIsOrtho(bool value);
     void setView(const vec3& eye, const vec3& target);
     void setProjection(float fov, float nearClip, float farClip);
+    void setAspect(float aspect);
     void setDimensions(const ivec2& dimensions);
     void fit(const Foundation::BoundingBox& bounds);
     void fit(const Foundation::BoundingBox& bounds, const vec3& direction);
     void mouseMove(int xPos, int yPos, const Inputs& inputs);
-
+    float fov() const { return _fov; }
+    float getNear() const { return _near; }
+    float getFar() const { return _far; }
+    bool isOrtho() const { return _isOrtho; }
+    
+    void moveTo(const mat4& destViewMatrix);
+    void update(float delta);
+    bool isMoving() const { return (_moveT < 1.0f); }
+    
 private:
     /*** Private Functions ***/
-
+    
     void orbit(const vec2& delta);
     void pan(const vec2& delta);
     void dolly(const vec2& delta);
-
+    
     /*** Private Variables ***/
-
+    
     bool _isUpdating = false;
     vec2 _lastMouse;
     bool _isViewDirty = true;
@@ -72,6 +81,17 @@ private:
     vec3 _target      = vec3(0.0f, 0.0f, 0.0f);
     vec3 _up          = vec3(0.0f, 1.0f, 0.0f);
     ivec2 _dimensions = ivec2(100, 100);
+    float _aspectRatio = 1.0f;
     mat4 _viewMatrix;
     mat4 _projMatrix;
+    
+    float _moveT = 1.0f;
+    mat4 _destView, _fromView;
+    float _destFov, _destNear, _destFar, _destAspect;
+    float _fromFov, _fromNear, _fromFar, _fromAspect;
+
+
+    mat4 tweenCameraViewMatrix(const mat4& from, const mat4& to, float t);
+    float easeInOutCubic(float t);
+
 };

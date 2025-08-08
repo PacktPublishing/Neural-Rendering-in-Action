@@ -150,7 +150,7 @@ void HdAuroraRenderPass::_Execute(
     const auto camera = renderPassState->GetCamera();
     GfMatrix4f viewMat(camera->GetTransform().GetInverse());
     GfMatrix4f projMat(camera->ComputeProjectionMatrix());
-
+    
     // Check to see if we need to flip the output image.
     // Default to true if not set.
     bool flipY      = true;
@@ -167,6 +167,11 @@ void HdAuroraRenderPass::_Execute(
         projMat[1][3] = -projMat[1][3];
     }
 
+#if defined __APPLE__
+    viewMat = viewMat.GetTranspose();
+    projMat = projMat.GetTranspose();
+#endif
+    
     // Set the view and projection matrices on the renderer.
     _owner->GetRenderer()->setCamera((float*)&viewMat, (float*)&projMat);
 

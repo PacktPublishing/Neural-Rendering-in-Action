@@ -1,4 +1,4 @@
-// Copyright 2022 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,16 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-/**
- * Copyright 2021 Autodesk, Inc.
- * All rights reserved.
- *
- * This computer source code and related instructions and comments are the unpublished confidential
- * and proprietary information of Autodesk, Inc. and are protected under Federal copyright and state
- * trade secret law. They may not be disclosed to, copied or used by any third party without the
- * prior written consent of Autodesk, Inc.
- *
- */
 
 #if !defined(DISABLE_UNIT_TESTS)
 

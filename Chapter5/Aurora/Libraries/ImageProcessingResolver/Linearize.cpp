@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -57,9 +57,10 @@ void canonInverse(
     float exposure2 = exp2(exposure);
 
     // Image dims and pixel count.
-    int imagewidth  = imageData.width;
-    int imageheight = imageData.height;
-    int pixels      = imagewidth * imageheight * numChannels;
+    int imageWidth  = imageData.width;
+    int imageHeight = imageData.height;
+    size_t pixels   = static_cast<size_t>(imageWidth) * static_cast<size_t>(imageHeight)
+        * static_cast<size_t>(numChannels);
 
     // If the input format is LDR we must convert to float first, use temp buffer.
     bool isConversionRequired = imageData.format == pxr::HioFormatUNorm8Vec3srgb;
@@ -82,7 +83,7 @@ void canonInverse(
     const float lowHighBreak = 0.9932f;
 
     const float shift = 0.18f;
-    for (int i = 0; i < pixels; ++i)
+    for (size_t i = 0; i < pixels; ++i)
     {
         float val;
         if (isConversionRequired)

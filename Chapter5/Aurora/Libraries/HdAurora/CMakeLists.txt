@@ -2,7 +2,10 @@
 project(hdAurora)
 
 find_package(glm REQUIRED) # Find the GLM vector maths package.
-find_package(OpenGL REQUIRED)
+find_package(OpenGL REQUIRED) # Find OpenGL library for pxr targets
+if (NOT APPLE)
+    find_package(Vulkan QUIET MODULE COMPONENTS shaderc_combined) # Find Vulkan SDK for pxr targets
+endif()
 find_package(GLEW REQUIRED)
 find_package(MaterialX REQUIRED) # MaterialX SDK
 find_package(pxr REQUIRED) # Find the Universal Scene Description (USD) library
@@ -68,10 +71,10 @@ PRIVATE
     OpenGL::GL
     GLEW::glew
     MaterialX::GenGlsl
-    pxr::usd
-    pxr::hf
-    pxr::hd
-    pxr::hdx
+    usd
+    hf
+    hd
+    hdx
     Foundation
     ${PYTHON_DEPENDENCY}
     Aurora
@@ -79,6 +82,20 @@ PRIVATE
 
 # Add default compile definitions (set in root CMakefile)
 target_compile_definitions(${PROJECT_NAME} PRIVATE ${DEFAULT_COMPILE_DEFINITIONS})
+
+# Config the plug information file.
+if(WIN32)
+    set(PLUG_INFO_LIBRARY_NAME "hdAurora.dll")
+elseif(APPLE)
+    set(PLUG_INFO_LIBRARY_NAME "libhdAurora.dylib")
+else()
+    set(PLUG_INFO_LIBRARY_NAME "libhdAurora.so")
+endif()
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources/plugInfo.json.in"
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources/plugInfo.json"
+    @ONLY
+)
 
 if(WIN32)
     # Create a custom target that will copy USD executables to the runtime folder.
@@ -109,7 +126,7 @@ if(WIN32)
     set(HDAURORA_PLUGIN_RESOURCES_DIR ${CMAKE_CURRENT_SOURCE_DIR}/resources)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:${PROJECT_NAME}> $<$<CONFIG:Debug>:$<TARGET_PDB_FILE:${PROJECT_NAME}>> ${RUNTIME_OUTPUT_DIR}/usd
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${HDAURORA_PLUGIN_RESOURCES_DIR} ${RUNTIME_OUTPUT_DIR}/usd/hdAurora/resources
+        COMMAND ${CMAKE_COMMAND} -E copy ${HDAURORA_PLUGIN_RESOURCES_DIR}/plugInfo.json ${RUNTIME_OUTPUT_DIR}/usd/hdAurora/resources/plugInfo.json
     )
 
 else() # Linux

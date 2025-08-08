@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -1257,6 +1257,27 @@ void PTRenderer::submitDenoising(bool isRestartRequested)
 #else
 void PTRenderer::submitDenoising(bool /*isRestart*/) {}
 #endif // ENABLE_DENOISER
+
+bool PTRenderer::updateAccumulationGPUStruct(uint32_t sampleIndex, Accumulation* pStaging)
+{
+    Accumulation settings;
+    // Prepare accumulation settings.
+    settings.sampleIndex        = sampleIndex;
+    settings.isDenoisingEnabled = _values.asBoolean(kLabelIsDenoisingEnabled) ? 1 : 0;
+
+    // If there are no changes compared local CPU copy, then do nothing and return false.
+    if (memcmp(&_accumData, &settings, sizeof(Accumulation)) == 0)
+        return false; // No changes.
+
+    // Update local CPU copy.
+    _accumData = settings;
+
+    // Update staging buffer, if one provided.
+    if (pStaging)
+        *pStaging = settings;
+
+    return true;
+}
 
 void PTRenderer::submitAccumulation(uint32_t sampleIndex)
 {

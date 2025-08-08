@@ -1,4 +1,4 @@
-# Copyright 2022 Autodesk, Inc.
+# Copyright 2025 Autodesk, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -78,7 +78,7 @@ if(args.build):
     if(subprocess.run(["python","Scripts/installExternals.py",externals_folder],cwd=args.aurora_root).returncode!=0):
         sys.exit("Failed to install externals")
     print("- Running Cmake.")
-    if(subprocess.run(["cmake","-S",args.aurora_root,"-B",aurora_build_folder,"-D","EXTERNALS_DIR="+externals_folder,"-D","CMAKE_BUILD_TYPE="+args.config],cwd=args.aurora_root).returncode!=0):
+    if(subprocess.run(["cmake","-S",args.aurora_root,"-B",aurora_build_folder,"-D","EXTERNALS_ROOT="+externals_folder,"-D","CMAKE_BUILD_TYPE="+args.config],cwd=args.aurora_root).returncode!=0):
         sys.exit("Failed to run Cmake")
     print("- Building Aurora.")
     if(subprocess.run(["cmake","--build",aurora_build_folder,"--config",args.config],cwd=args.aurora_root).returncode!=0):

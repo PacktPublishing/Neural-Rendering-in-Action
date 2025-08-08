@@ -1,5 +1,7 @@
 project(Aurora)
 
+set(AURORA_OPTIONAL_LIBRARIES)
+
 if(ENABLE_DIRECTX_BACKEND)
     # Add the preprocessor definition for directX backend flag.
     add_compile_definitions(DIRECTX_SUPPORT=1)
@@ -23,13 +25,26 @@ if(ENABLE_HGI_BACKEND)
     # Add the preprocessor definition for HGI backend flag.
     add_compile_definitions(HGI_SUPPORT=1)
 
-    find_package(pxr REQUIRED) # Pixar Universal Scene Description
+    find_package(OpenGL REQUIRED)
 
-    if (NOT TARGET pxr::hgiVulkan)
-        message(FATAL_ERROR "USD hgiVulkan library is required to build Aurora with HGI backend enabled.")
+    if (NOT APPLE)
+        find_package(Vulkan REQUIRED MODULE COMPONENTS shaderc_combined) # Vulkan SDK
     endif()
 
-    find_package(Vulkan REQUIRED) # Vulkan SDK
+    find_package(pxr REQUIRED) # Pixar Universal Scene Description
+
+    if (APPLE)
+        if (NOT TARGET hgiMetal)
+            message(FATAL_ERROR "USD hgiMetal library is required to build Aurora with HGI backend enabled for Mac.")
+        endif()
+
+        list(APPEND AURORA_OPTIONAL_LIBRARIES "-framework Metal")
+    else()
+        if (NOT TARGET hgiVulkan)
+            message(FATAL_ERROR "USD hgiVulkan library is required to build Aurora with HGI backend enabled.")
+        endif()
+    endif()
+
 else()
     add_compile_definitions(HGI_SUPPORT=0)
 endif()
@@ -225,6 +240,8 @@ if(ENABLE_HGI_BACKEND)
         "Source/HGI/HGIRenderBuffer.h"
         "Source/HGI/HGIRenderer.cpp"
         "Source/HGI/HGIRenderer.h"
+        "Source/HGI/HGISampler.cpp"
+        "Source/HGI/HGISampler.h"
         "Source/HGI/HGIScene.cpp"
         "Source/HGI/HGIScene.h"
         "Source/HGI/HGIWindow.cpp"
@@ -237,10 +254,50 @@ if(ENABLE_HGI_BACKEND)
         "Source/HGI/Shaders/InstanceData.glsl"
     )
 
+    if(APPLE)
+        set(HGI_METAL_SHADERS
+            "Source/HGI/MetalShaders/Accumulation.metal"
+            "Source/HGI/MetalShaders/BSDF.metal"
+            "Source/HGI/MetalShaders/BSDFCommon.metal"
+            "Source/HGI/MetalShaders/Colors.metal"
+            "Source/HGI/MetalShaders/DefaultMaterial.metal"
+            "Source/HGI/MetalShaders/Environment.metal"
+            "Source/HGI/MetalShaders/EvaluateMaterial.metal"
+            "Source/HGI/MetalShaders/Frame.metal"
+            "Source/HGI/MetalShaders/Geometry.metal"
+            "Source/HGI/MetalShaders/GlobalBufferAccessors.metal"
+            "Source/HGI/MetalShaders/GlobalPipelineState.metal"
+            "Source/HGI/MetalShaders/Globals.metal"
+            "Source/HGI/MetalShaders/GroundPlane.metal"
+            "Source/HGI/MetalShaders/InstancePipelineState.metal"
+            "Source/HGI/MetalShaders/MainEntryPoints.metal"
+            "Source/HGI/MetalShaders/Material.metal"
+            "Source/HGI/MetalShaders/Options.metal"
+            "Source/HGI/MetalShaders/PathTracingCommon.metal"
+            "Source/HGI/MetalShaders/PostProcessing.metal"
+            "Source/HGI/MetalShaders/Random.metal"
+            "Source/HGI/MetalShaders/RayTrace.metal"
+            "Source/HGI/MetalShaders/Sampling.metal"
+            "Source/HGI/MetalShaders/ShadeFunctions.metal"
+            "Source/HGI/MetalShaders/StandardSurfaceBSDF.metal"
+            "Source/HGI/MetalShaders/ReferenceBSDF.metal"
+            )
+    else()
+        set(HGI_METAL_SHADERS 
+            ""
+            )
+    endif()
+
     # Set MINIFIED_SHADERS_HEADER to filename of auto-generated header file containing minified HLSL shader strings.
     set(MINIFIED_HGI_SHADERS_HEADER "${COMPILED_SHADERS_DIR}/HGIShaders.h")
     # Add commands to minifiy hgi shaders.
     minify_shaders("${MINIFIED_HGI_SHADERS_HEADER}" "${CMAKE_CURRENT_SOURCE_DIR}/Source/HGI/Shaders" "${HGI_SHADERS}")
+
+    if(APPLE)
+        set(MINIFIED_HGI_METAL_LIB_HEADER "${COMPILED_SHADERS_DIR}/HGIMetalLib.h")
+        minify_metal_lib("${MINIFIED_HGI_METAL_LIB_HEADER}" "${CMAKE_CURRENT_SOURCE_DIR}/Source/HGI/MetalShaders" "${HGI_METAL_SHADERS}")
+    endif()
+
 endif()
 
 # Create shared library for the project containing all the sources.
@@ -253,7 +310,9 @@ add_library(${PROJECT_NAME} SHARED
     ${DIRECTX_PRECOMPILED_SHADERS}
     ${HGI_SOURCE}
     ${HGI_SHADERS}
+    ${HGI_METAL_SHADERS}
     ${MINIFIED_HGI_SHADERS_HEADER}
+    ${MINIFIED_HGI_METAL_LIB_HEADER}
     ${VERSION_FILES}
 )
 
@@ -272,6 +331,9 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/Source" FILES ${HGI_SOURCE})
 source_group("Shaders" FILES ${COMMON_SHADERS})
 source_group("DirectX/Shaders" FILES ${DIRECTX_PRECOMPILED_SHADERS})
 source_group("HGI/Shaders" FILES ${HGI_SHADERS})
+if(APPLE)
+    source_group("HGI/MetalShaders" FILES ${HGI_METAL_SHADERS})
+endif()
 
 if(WIN32)
 
@@ -346,8 +408,8 @@ if(WIN32)
         # Copy additional HGI files of the Pixar USD to our runtime directory
         add_custom_target(CopyUSDDLLs ALL
             COMMAND ${CMAKE_COMMAND} -E make_directory ${RUNTIME_OUTPUT_DIR}/usd/hgiVulkan/resources
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PXR_LIBRARY_DIR}/usd/plugInfo.json ${RUNTIME_OUTPUT_DIR}/usd
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PXR_LIBRARY_DIR}/usd/hgiVulkan/resources/plugInfo.json ${RUNTIME_OUTPUT_DIR}/usd/hgiVulkan/resources
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PXR_LIBRARY_DIRS}/usd/plugInfo.json ${RUNTIME_OUTPUT_DIR}/usd
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PXR_LIBRARY_DIRS}/usd/hgiVulkan/resources/plugInfo.json ${RUNTIME_OUTPUT_DIR}/usd/hgiVulkan/resources
         )
         set_property(TARGET CopyUSDDLLs PROPERTY FOLDER "Deployment")
         add_dependencies(CopyUSDDLLs MakeRuntimeDir)
@@ -373,6 +435,9 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${LIBRARY_OUTPUT_DIR}"
     ARCHIVE_OUTPUT_DIRECTORY "${LIBRARY_OUTPUT_DIR}"
     PDB_OUTPUT_DIRECTORY "${RUNTIME_OUTPUT_DIR}"    
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH_USE_LINK_PATH TRUE
+    INSTALL_RPATH "${TBB_LIBRARY_DIR};${PXR_LIBRARY_DIRS};${INSTALL_RPATH}"
     # Follow the USD convention of lower-case initial on libraries.
     OUTPUT_NAME "aurora"
 )
@@ -390,13 +455,19 @@ else()
 endif()
 
 if(ENABLE_HGI_BACKEND)
-    set(USD_TARGETS pxr::usd pxr::hgi)
+    set(USD_TARGETS usd hgi)
 endif()
 
 if(ENABLE_DIRECTX_BACKEND)
     set(D3D12_TARGETS D3D12::D3D12 D3D12::compiler)
 else()
     set(D3D12_TARGETS "")
+endif()
+
+if(APPLE)
+    find_library(METAL_FRAMEWORK Metal)
+else()
+    set(METAL_FRAMEWORK "")
 endif()
 
 target_link_libraries(${PROJECT_NAME}
@@ -409,6 +480,8 @@ PRIVATE
     stb::stb
     glm::glm
     Slang::Slang
+    ${AURORA_OPTIONAL_LIBRARIES}
+    ${METAL_FRAMEWORK}
 )
 
 target_include_directories(${PROJECT_NAME}
@@ -445,6 +518,10 @@ if(ENABLE_DIRECTX_BACKEND)
     )
 
     # TODO: do we have Vulkan computer shaders amd need to do similiar things for them?
+endif()
+
+if(APPLE)
+    set_source_files_properties(Source/HGI/HGIRenderer.cpp PROPERTIES LANGUAGE OBJCXX)
 endif()
 
 install(TARGETS ${PROJECT_NAME}

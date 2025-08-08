@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -171,10 +171,10 @@ MaterialDefaultValues MaterialBase::StandardSurfaceDefaults(
 
 MaterialBase::MaterialBase(
     const string& name, MaterialShaderPtr pShader, MaterialDefinitionPtr pDef) :
-    _textures(pDef->defaults().textureNames),
     _pDef(pDef),
     _pShader(pShader),
     _uniformBuffer(pDef->defaults().propertyDefinitions, pDef->defaults().properties),
+    _textures(pDef->defaults().textureNames),
     _name(name)
 
 {

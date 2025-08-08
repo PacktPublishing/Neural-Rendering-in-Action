@@ -1,4 +1,4 @@
-// Copyright 2024 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/imaging/hd/renderDelegate.h>
+#include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/sdf/path.h>
 
 // Aurora & glm headers.
@@ -60,6 +61,7 @@ TEST_F(StabilityTest, TestTextures)
 {
     // NOTE: In the following tests, all images will be treated as environment images since there
     // is no difference between processing material textures and environment maps when loading.
+    ArSetPreferredResolver("ImageProcessingResolverPlugin");
     std::unique_ptr<HdAuroraRenderDelegate> pAuroraRenderDelegate =
         std::make_unique<HdAuroraRenderDelegate>();
 
@@ -90,25 +92,6 @@ TEST_F(StabilityTest, TestTextures)
     // Ensure no crash when resource activated.
     pAuroraRenderDelegate->setAuroraEnvironmentLightImagePath(resPath);
     pAuroraRenderDelegate->UpdateAuroraEnvironment();
-
-// TODO: To pass the extreme-sized tests, the corresponding fix in USD (hiooiio) is required.
-// Enable the following tests once USD is upgraded.
-#ifdef ENABLE_EXTREME_SIZE_TEST
-    // Test extreme-sized textures. ///////////////////////////////////////////
-    const std::string environmentImage = _dataPath + "/Textures/pretville_street_24k.exr";
-
-    resPath = pAuroraRenderDelegate->imageCache().acquireImage(environmentImage, true, false);
-    EXPECT_FALSE(resPath.empty());
-    // Ensure no crash when resource activated.
-    pAuroraRenderDelegate->setAuroraEnvironmentLightImagePath(resPath);
-    pAuroraRenderDelegate->UpdateAuroraEnvironment();
-
-    resPath = pAuroraRenderDelegate->imageCache().acquireImage(environmentImage, true, true);
-    EXPECT_FALSE(resPath.empty());
-    // Ensure no crash when resource activated.
-    pAuroraRenderDelegate->setAuroraEnvironmentLightImagePath(resPath);
-    pAuroraRenderDelegate->UpdateAuroraEnvironment();
-#endif
 }
 
 } // namespace

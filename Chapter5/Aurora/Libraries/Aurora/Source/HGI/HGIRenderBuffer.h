@@ -1,4 +1,4 @@
-// Copyright 2022 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,17 +36,31 @@ public:
 
     IBufferPtr asReadable(size_t& /*stride*/) override { return nullptr; }
 
-    IBufferPtr asShared() override { return nullptr; }
+    IBufferPtr asShared() override { return std::make_shared<HGIBuffer>(this); }
 
     pxr::HgiTextureHandle storageTex() { return _storageTex->handle(); }
     uint32_t width() { return _width; }
     uint32_t height() { return _height; }
 
 private:
+    class HGIBuffer : public IRenderBuffer::IBuffer
+    {
+    public:
+        HGIBuffer(HGIRenderBuffer* parent) : _parent(parent) {}
+
+        const void* data() override { return nullptr; };
+        const void* handle() override {
+            return static_cast<const void*>((void*)_parent->_storageTex->handle()->GetRawResource());
+        }
+    private:
+        HGIRenderBuffer* _parent;
+    };
+    
     HgiTextureHandleWrapper::Pointer _storageTex;
     HGIRenderer* _pRenderer;
     uint32_t _width;
     uint32_t _height;
+    pxr::HgiFormat _format;
     std::vector<uint8_t> _mappedBuffer;
 };
 

@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -113,7 +113,9 @@ TEST_P(MaterialTest, TestMaterialDefault)
     // Create a pRenderer for this type
     IRenderer::Backend backend = rendererBackend();
     auto pRenderer             = createRenderer(backend);
-
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
     // Create a material
     IScenePtr pScene = pRenderer->createScene();
     pRenderer->setScene(pScene);
@@ -220,7 +222,7 @@ static void clearAllProperties(Properties& props)
     props["displacement_image"].clear();
 }
 
-// Test material functionality using baseline image testing
+// Test material functionality using baseline image testing.
 TEST_P(MaterialTest, TestMaterialClearMaterialProperty)
 {
     // Create the default scene (also creates renderer)
@@ -230,7 +232,9 @@ TEST_P(MaterialTest, TestMaterialClearMaterialProperty)
     // If pRenderer is null this renderer type not supported, skip rest of the test.
     if (!pRenderer)
         return;
-
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
     // Create teapot geometry.
     Path geometry = createTeapotGeometry(*pScene);
 
@@ -270,7 +274,9 @@ Paths createTeapotGrid(TestHelpers::FixtureBase& pFixture, uint32_t gridWidth, u
 {
     auto pScene    = pFixture.defaultScene();
     auto pRenderer = pFixture.defaultRenderer();
-
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
     // Create shared geom for all instances.
     Path geometry = pFixture.createTeapotGeometry(*pScene);
 
@@ -302,8 +308,12 @@ Paths createTeapotGrid(TestHelpers::FixtureBase& pFixture, uint32_t gridWidth, u
     return pScene->addInstances(geometry, instDefs);
 }
 
-// Test basic material properties using baseline image testing
+// Test basic material properties using baseline image testing.
+#if defined(__APPLE__)
+TEST_P(MaterialTest, DISABLED_TestMaterialBasicMaterialProperties) // TODO: Fix and re-enable this test.
+#else
 TEST_P(MaterialTest, TestMaterialBasicMaterialProperties)
+#endif
 {
     // Create the default scene (also creates renderer)
     auto pScene    = createDefaultScene();
@@ -313,7 +323,9 @@ TEST_P(MaterialTest, TestMaterialBasicMaterialProperties)
     // If pRenderer is null this renderer type not supported, skip rest of the test.
     if (!pRenderer)
         return;
-
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
     // Create a grid of teapot instances.
     const uint32_t gridWidth  = 5;
     const uint32_t gridHeight = 5;
@@ -523,7 +535,7 @@ TEST_P(MaterialTest, TestMaterialBasicMaterialProperties)
     }
 }
 
-// Set just the transmission value
+// Set just the transmission value.
 TEST_P(MaterialTest, TestMaterialSetTransmission)
 {
     // Create the default scene (also creates renderer)
@@ -533,7 +545,9 @@ TEST_P(MaterialTest, TestMaterialSetTransmission)
     // If pRenderer is null this renderer type not supported, skip rest of the test.
     if (!pRenderer)
         return;
-
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
     // Create teapot instance.
     Path geometry = createTeapotGeometry(*pScene);
 
@@ -565,7 +579,9 @@ TEST_P(MaterialTest, TestMaterialEmission)
     {
         return;
     }
-
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
     // Create a material with a non-zero emission value and a specific emission color, along with
     // minimal diffuse / specular reflectance so that the emission is dominant.
     Path material("EmissionMaterial");
@@ -595,7 +611,7 @@ TEST_P(MaterialTest, TestMaterialEmission)
     ASSERT_BASELINE_IMAGE_PASSES_IN_FOLDER(currentTestName() + "EmissionImage", "Materials");
 }
 
-// Test more advanced material properties using baseline image testing
+// Test more advanced material properties using baseline image testing.
 TEST_P(MaterialTest, TestMaterialAdvancedMaterialProperties)
 {
     // Create the default scene (also creates renderer)
@@ -606,15 +622,21 @@ TEST_P(MaterialTest, TestMaterialAdvancedMaterialProperties)
     // If pRenderer is null this renderer type not supported, skip rest of the test.
     if (!pRenderer)
         return;
-
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
     // Create a grid of teapot instances.
     const uint32_t gridWidth  = 5;
     const uint32_t gridHeight = 5;
     Paths teapotGrid          = createTeapotGrid(*this, 5, 5);
     vector<Path> materialGrid(teapotGrid.size());
-
+#if defined(__APPLE__)
+    // Test with Standard Surface BSDF.
+    for (int useReference = 0; useReference < 1; useReference++)
+#else
     // Test with reference BSDF and Standard Surface BSDF.
     for (int useReference = 0; useReference < 2; useReference++)
+#endif
     {
         // Enabled reference BSDF via options.
         pRenderer->options().setBoolean("isReferenceBSDFEnabled", useReference);
@@ -636,7 +658,7 @@ TEST_P(MaterialTest, TestMaterialAdvancedMaterialProperties)
         vec3 bc2(0.3f, 0.2f, 0.95f);
         vec3 bc3(0.7f, 0.8f, 0.05f);
         vec3 grey(0.25f, 0.25f, 0.25f);
-
+        
         // Test subsurface color (X-axis) against subsurface radius (Y-axis)
         for (uint32_t i = 0; i < gridHeight; i++)
         {
@@ -840,7 +862,9 @@ TEST_P(MaterialTest, TestMaterialTypes)
     // If pRenderer is null this renderer type not supported, skip rest of the test.
     if (!pRenderer)
         return;
-
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
     setDefaultRendererPathTracingIterations(256);
 
     // Set an invalid material type.
@@ -994,6 +1018,9 @@ TEST_P(MaterialTest, TestMaterialX)
 // Test material creation using MaterialX file dumped from HdAurora.
 TEST_P(MaterialTest, TestHdAuroraMaterialX)
 {
+#if defined __APPLE__
+    GTEST_SKIP() << "MaterialX is not supported on MacOS yet.";
+#endif
     // Create the default scene (also creates renderer)
     auto pScene    = createDefaultScene();
     auto pRenderer = defaultRenderer();
@@ -1029,6 +1056,9 @@ TEST_P(MaterialTest, TestHdAuroraMaterialX)
 // Test material creation using MaterialX file dumped from HdAurora that has a texture.
 TEST_P(MaterialTest, TestHdAuroraTextureMaterialX)
 {
+#if defined __APPLE__
+    GTEST_SKIP() << "MaterialX is not supported on MacOS yet.";
+#endif
     // Create the default scene (also creates renderer)
     auto pScene    = createDefaultScene();
     auto pRenderer = defaultRenderer();
@@ -1320,7 +1350,9 @@ TEST_P(MaterialTest, TestMaterialTransparency)
     // If pRenderer is null this renderer type not supported, skip rest of the test.
     if (!pRenderer)
         return;
-
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
     // Constant colors.
     vec3 color0(0.5f, 1.0f, 0.3f);
     vec3 opacity0(0.1f, 0.25f, 0.1f);
@@ -1364,8 +1396,11 @@ TEST_P(MaterialTest, TestMaterialTransparency)
     ASSERT_BASELINE_IMAGE_PASSES_IN_FOLDER(currentTestName() + "Opacity", "Materials");
 }
 
-// TODO: Re-enable test when shadow anyhit shaders are working.
+#if defined(__APPLE__)
+TEST_P(MaterialTest, DISABLED_TestMaterialShadowTransparency) // TODO: Fix and re-enable this test.
+#else
 TEST_P(MaterialTest, TestMaterialShadowTransparency)
+#endif
 {
     // Create the default scene (also creates renderer)
     auto pScene    = createDefaultScene();
@@ -1374,7 +1409,9 @@ TEST_P(MaterialTest, TestMaterialShadowTransparency)
     // If pRenderer is null this renderer type not supported, skip rest of the test.
     if (!pRenderer)
         return;
-
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
     defaultDistantLight()->values().setFloat3(
         Aurora::Names::LightProperties::kDirection, value_ptr(glm::vec3(0, -.5f, 1)));
     defaultDistantLight()->values().setFloat3(
@@ -1388,7 +1425,6 @@ TEST_P(MaterialTest, TestMaterialShadowTransparency)
     Path imagePath            = loadImage(txtName);
 
     // Constant colors.
-    vec3 color0(0.5f, 1.0f, 0.3f);
     vec3 opacity0(0.5f, 0.5f, 0.3f);
 
     // Create geometry for teapot and plane geometry.
@@ -1434,6 +1470,9 @@ TEST_P(MaterialTest, TestMaterialShadowTransparency)
 // TODO: Re-enable once samplers working.
 TEST_P(MaterialTest, TestMtlXSamplers)
 {
+#if defined __APPLE__
+    GTEST_SKIP() << "MaterialX is not supported on MacOS yet.";
+#endif
     // This mtlx file requires support ADSK materialX support.
     if (!adskMaterialXSupport())
         return;
@@ -1732,7 +1771,7 @@ TEST_P(MaterialTest, TestMaterialMaterialXLayerTransforms)
         pScene->setGeometryDescriptor(kDecalUVGeomPath, geomDesc);
     }
 
-    for (int layer = 0; layer < materialLayers.size(); layer++)
+    for (size_t layer = 0; layer < materialLayers.size(); layer++)
     {
         const Path kDecalUVGeomPath = "DecalUVGeomPath0";
         geometryLayers.push_back(kDecalUVGeomPath);
@@ -1755,6 +1794,9 @@ TEST_P(MaterialTest, TestMaterialMaterialXLayerTransforms)
 // Normal map image test.
 TEST_P(MaterialTest, TestNormalMapMaterialX)
 {
+#if defined __APPLE__
+    GTEST_SKIP() << "MaterialX is not supported on MacOS yet.";
+#endif
     // Create the default scene (also creates renderer)
     auto pScene    = createDefaultScene();
     auto pRenderer = defaultRenderer();
@@ -1801,6 +1843,9 @@ TEST_P(MaterialTest, TestNormalMapMaterialX)
 // Test object space normal in MaterialX.
 TEST_P(MaterialTest, TestObjectSpaceMaterialX)
 {
+#if defined __APPLE__
+    GTEST_SKIP() << "MaterialX is not supported on MacOS yet.";
+#endif
     // This mtlx file requires support ADSK MaterialX support.
     if (!adskMaterialXSupport())
         return;

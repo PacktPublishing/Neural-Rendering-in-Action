@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,25 +16,9 @@
 
 #include "Transpiler.h"
 #include <slang.h>
+#include <slang-com-ptr.h>
 
 BEGIN_AURORA
-
-// Slang UUID compare operator, needed by casting operations.
-bool operator==(const SlangUUID& aIn, const SlangUUID& bIn)
-{
-    // Use the largest type the honors the alignment of Guid
-    typedef uint32_t CmpType;
-    union GuidCompare
-    {
-        SlangUUID guid;
-        CmpType data[sizeof(SlangUUID) / sizeof(CmpType)];
-    };
-    // Type pun - so compiler can 'see' the pun and not break aliasing rules
-    const CmpType* a = reinterpret_cast<const GuidCompare&>(aIn).data;
-    const CmpType* b = reinterpret_cast<const GuidCompare&>(bIn).data;
-    // Make the guid comparison a single branch, by not using short circuit
-    return ((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2]) | (a[3] ^ b[3])) == 0;
-}
 
 // Slang string blob.  Simple wrapper around std::string that can be used by Slang compiler.
 struct StringSlangBlob : public ISlangBlob, ISlangCastable
@@ -136,6 +120,12 @@ struct AuroraSlangFileSystem : public ISlangFileSystem
         _fileBlobs[name] = make_unique<StringSlangBlob>(code);
     }
 
+    slang::IBlob* getSource(const string& name)
+    {
+        auto iter = _fileBlobs.find(name);
+        return iter != _fileBlobs.end() ? iter->second.get() : nullptr;
+    }
+
     // Map of string blobs.
     map<string, unique_ptr<StringSlangBlob>> _fileBlobs;
 
@@ -146,7 +136,10 @@ struct AuroraSlangFileSystem : public ISlangFileSystem
 Transpiler::Transpiler(const std::map<std::string, const std::string&>& fileText)
 {
     _pFileSystem = make_unique<AuroraSlangFileSystem>(fileText);
-    _pSession    = spCreateSession();
+
+    SlangGlobalSessionDesc desc;
+    desc.enableGLSL = true;
+    slang::createGlobalSession(&desc, &_pSession);
 }
 
 Transpiler::~Transpiler()
@@ -159,9 +152,13 @@ void Transpiler::setSource(const string& name, const string& code)
     _pFileSystem->setSource(name, code);
 }
 
-bool Transpiler::transpileCode(
-    const string& shaderCode, string& codeOut, string& errorOut, Language target)
+bool Transpiler::transpileCode(const string& shaderCode, string& codeOut, string& errorOut,
+    Language target, const map<string, string>& preprocessorDefines)
 {
+#if defined(__APPLE__)
+    // TODO: We do actually want to be transpiling here eventually
+    return true;
+#endif
     // Dummy file name to use as container for shader code.
     const string codeFileName = "__shaderCode";
 
@@ -169,7 +166,7 @@ bool Transpiler::transpileCode(
     setSource(codeFileName, shaderCode);
 
     // Transpile the shader code.
-    bool res = transpile(codeFileName, codeOut, errorOut, target);
+    bool res = transpile(codeFileName, codeOut, errorOut, target, preprocessorDefines);
 
     // Clear the shader source to release memory.
     setSource(codeFileName, "");
@@ -177,63 +174,102 @@ bool Transpiler::transpileCode(
     return res;
 }
 
-bool Transpiler::transpile(
-    const string& shaderName, string& codeOut, string& errorOut, Language target)
+bool Transpiler::transpile(const string& shaderName, string& codeOut, string& errorOut,
+    Language target, const map<string, string>& preprocessorDefines)
 {
     // Clear result.
     errorOut.clear();
     codeOut.clear();
 
-    // Create a Slang compile request for transpilation.
-    slang::ICompileRequest* pRequest;
-    [[maybe_unused]] const int reqIndex = _pSession->createCompileRequest(&pRequest);
+    // TODO: Multithreading.
+    using namespace slang;
 
-    auto profileId = _pSession->findProfile("sm_6_3");
-
-    // Set the file system and compile fiags.
-    pRequest->setFileSystem(_pFileSystem.get());
-    pRequest->setCompileFlags(SLANG_COMPILE_FLAG_NO_MANGLING);
-    // Create code gen target (with GLSL or HLSL language as required).
-    const int targetIndex =
-        pRequest->addCodeGenTarget(target == Language::GLSL ? SLANG_GLSL : SLANG_HLSL);
-
-    pRequest->setTargetProfile(targetIndex, profileId);
-    // Set target flags to generate whole program.
-    pRequest->setTargetFlags(targetIndex, SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM);
+    // Create the target description for the session.
+    TargetDesc targetDesc;
+    switch (target)
+    {
+    case Language::HLSL:
+        targetDesc.format  = SLANG_HLSL;
+        targetDesc.profile = _pSession->findProfile("lib_6_3");
+        break;
+    case Language::GLSL:
+        targetDesc.format  = SLANG_GLSL;
+        targetDesc.profile = _pSession->findProfile("glsl_460");
+        break;
+    case Language::Metal:
+        targetDesc.format  = SLANG_METAL;
+        targetDesc.profile = _pSession->findProfile("metallib_2_3");
+        break;
+    default:
+        AU_FAIL("Unsupported target language for transpiler.");
+        return false;
+    }
+    // Use standard line directives (with filename).
+    targetDesc.lineDirectiveMode = SLANG_LINE_DIRECTIVE_MODE_STANDARD;
     // TODO: The buffer layout might be an issue, need to work out correct flags.
-    // pRequest->setTargetForceGLSLScalarBufferLayout(targetIndex, true);
+    // targetDesc.forceGLSLScalarBufferLayout = true;
 
-    // At add translation unit from Slang to target language.
-    const int translationUnitIndex =
-        pRequest->addTranslationUnit(SLANG_SOURCE_LANGUAGE_SLANG, nullptr);
+    // Create compiler options.
+    std::vector<CompilerOptionEntry> compilerOptions;
+    compilerOptions.push_back(
+        { CompilerOptionName::NoMangle, { CompilerOptionValueKind::Int, 1, 0, nullptr, nullptr } });
+    compilerOptions.push_back({ CompilerOptionName::GenerateWholeProgram,
+        { CompilerOptionValueKind::Int, 1, 0, nullptr, nullptr } });
+    targetDesc.compilerOptionEntries    = compilerOptions.data();
+    targetDesc.compilerOptionEntryCount = static_cast<uint32_t>(compilerOptions.size());
 
-    // Use standard line directives (with filename)
-    pRequest->setTargetLineDirectiveMode(targetIndex, SLANG_LINE_DIRECTIVE_MODE_STANDARD);
-    // Use column major matrix format.
-    pRequest->setTargetMatrixLayoutMode(targetIndex, SLANG_MATRIX_LAYOUT_COLUMN_MAJOR);
+    // Create the session description.
+    SessionDesc sessionDesc;
+    sessionDesc.targets                 = &targetDesc;
+    sessionDesc.targetCount             = 1;
+    sessionDesc.fileSystem              = _pFileSystem.get();
+    sessionDesc.defaultMatrixLayoutMode = SLANG_MATRIX_LAYOUT_COLUMN_MAJOR;
+    sessionDesc.allowGLSLSyntax         = true;
 
-    // Set shader name as source file name (file system will look up it up from file text map).
-    pRequest->addTranslationUnitSourceFile(translationUnitIndex, shaderName.c_str());
+    // Setup pre-defined macros.
+    std::vector<PreprocessorMacroDesc> preprocessorMacros;
+    for (const auto& [key, value] : preprocessorDefines)
+    {
+        preprocessorMacros.push_back({ key.c_str(), value.c_str() });
+    }
+    preprocessorMacros.push_back({ "DIRECTX", target == Language::HLSL ? "1" : "0" });
+    sessionDesc.preprocessorMacros     = preprocessorMacros.data();
+    sessionDesc.preprocessorMacroCount = preprocessorMacros.size();
 
-    // Set DIRECTX preprocessor directive.
-    pRequest->addPreprocessorDefine("DIRECTX", target == Language::GLSL ? "0" : "1");
+    // Create a session representing a scope for compilation with a consistent set of compiler
+    // options.
+    Slang::ComPtr<ISession> session;
+    _pSession->createSession(sessionDesc, session.writeRef());
 
     // Transpile the file.
-    const SlangResult compileRes = pRequest->compile();
-    if (compileRes != SLANG_OK)
+    Slang::ComPtr<IBlob> diagnostics;
+    const string fileName = shaderName + ".slang";
+    Slang::ComPtr<IModule> sessionModule(session->loadModuleFromSource(shaderName.c_str(),
+        fileName.c_str(), _pFileSystem->getSource(shaderName), diagnostics.writeRef()));
+    if (diagnostics)
     {
-        errorOut = pRequest->getDiagnosticOutput();
+        errorOut = (const char*)diagnostics->getBufferPointer();
+        return false;
+    }
+
+    // Link the module to get a program
+    Slang::ComPtr<IComponentType> linkedProgram;
+    sessionModule->link(linkedProgram.writeRef(), diagnostics.writeRef());
+    if (diagnostics)
+    {
+        errorOut = (const char*)diagnostics->getBufferPointer();
         return false;
     }
 
     // Get blob for result.
-    ISlangBlob* pOutBlob = nullptr;
-    pRequest->getTargetCodeBlob(targetIndex, &pOutBlob);
-    codeOut = (const char*)pOutBlob->getBufferPointer();
-
-    // Release request.
-    pRequest->release();
-
+    Slang::ComPtr<ISlangBlob> outBlob;
+    linkedProgram->getTargetCode(0 /* targetIndex */, outBlob.writeRef(), diagnostics.writeRef());
+    if (diagnostics)
+    {
+        errorOut = (const char*)diagnostics->getBufferPointer();
+        return false;
+    }
+    codeOut = (const char*)outBlob->getBufferPointer();
     return true;
 }
 

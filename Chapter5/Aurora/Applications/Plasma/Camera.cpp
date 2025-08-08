@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,6 +14,9 @@
 #include "pch.h"
 
 #include "Camera.h"
+
+#include <glm/gtx/matrix_decompose.hpp>
+#include <glm/gtx/quaternion.hpp>
 
 // The canonical direction vectors.
 static constexpr vec3 kForward = vec3(0.0f, 0.0f, -1.0f);
@@ -106,12 +109,21 @@ void Camera::setProjection(float fov, float nearClip, float farClip)
 {
     assert(fov > 0.0f && nearClip > 0.0f && farClip > 0.0f);
 
-    // Set the projection properties.
-    _fov  = fov;
-    _near = nearClip;
-    _far  = farClip;
+    _fromFov = _fov;
+    _destFov = fov;
+    
+    _fromNear = _near;
+    _destNear = nearClip;
+    
+    _fromFar = _far;
+    _destFar = farClip;
+//  APPLE TODO:   _moveT = 0.0f;
+}
 
-    _isProjDirty = true;
+void Camera::setAspect(float aspect) {
+    _fromAspect = _aspectRatio;
+    _destAspect = aspect;
+// APPLE TODO:    _moveT = 0.0f;
 }
 
 void Camera::setDimensions(const ivec2& dimensions)
@@ -120,6 +132,7 @@ void Camera::setDimensions(const ivec2& dimensions)
 
     // Set the dimensions.
     _dimensions = dimensions;
+    _aspectRatio = static_cast<float>(_dimensions.x) / _dimensions.y;
 
     _isProjDirty = true;
 }
@@ -273,4 +286,55 @@ void Camera::dolly(const vec2& delta)
     // NOTE: The projection matrix is dirty because the target distance may have changed here.
     _isViewDirty = true;
     _isProjDirty = true;
+}
+
+void Camera::moveTo(const mat4& destViewMatrix) {
+    _fromView = _viewMatrix;
+    _destView = destViewMatrix;
+    _moveT = 0.0f;
+}
+
+void Camera::update(float delta) {
+    if (isMoving()) {
+        _moveT += delta;
+        float easedT = easeInOutCubic(_moveT);
+        _viewMatrix = tweenCameraViewMatrix(_fromView, _destView, easedT);
+        _fov = mix(_fromFov, _destFov, easedT);
+        _near = mix(_fromNear, _destNear, easedT);
+        _far = mix(_fromFar, _destFar, easedT);
+        _aspectRatio = mix(_fromAspect, _destAspect, easedT);
+        _isProjDirty = true;
+    }
+}
+
+mat4 Camera::tweenCameraViewMatrix(const mat4& from, const mat4& to, float t) {
+    // Extract translation directly from matrix
+    vec3 translationA = vec3(from[3]);
+    vec3 translationB = vec3(to[3]);
+    
+    // Extract rotation assuming no scale/skew (orthonormal matrix)
+    quat rotationA = quat_cast(mat3(from));
+    quat rotationB = quat_cast(mat3(to));
+    
+    // Interpolate
+    vec3 interpTranslation = mix(translationA, translationB, t);
+    quat interpRotation = slerp(rotationA, rotationB, t);
+    
+    // Recompose
+    mat4 rotationMat = toMat4(interpRotation);
+    rotationMat[3] = vec4(interpTranslation, 1.0f);
+    
+    return rotationMat;
+}
+
+float Camera::easeInOutCubic(float t) {
+    float f;
+    if(t < 0.5f) {
+        f = 4.0f * t * t * t;
+    }
+    else {
+        t = 1.0f - t;
+        f = 1.0f - 4.0f * t * t * t;
+    }
+    return f;
 }

@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -174,13 +174,16 @@ void PTShaderOptions::clear()
 string PTShaderOptions::toHLSL() const
 {
     // Build HLSL string.
-    string hlslStr;
+    string hlslStr =
+        "#ifndef __OPTIONS_H__\n"
+        "#define __OPTIONS_H__\n";
 
     // Add each option as #defines statement.
     for (size_t i = 0; i < _data.size(); i++)
     {
         hlslStr += "#define " + _data[i].first + " " + to_string(_data[i].second) + "\n";
     }
+    hlslStr += "#endif // __OPTIONS_H__\n";
 
     // Return HLSL.
     return hlslStr;
@@ -213,9 +216,9 @@ bool PTShaderLibrary::compileLibrary(const ComPtr<IDxcLibrary>& pDXCLibrary, con
     // Build vector of argument flags to pass to compiler.
     vector<const wchar_t*> args;
     args.push_back(L"-WX"); // Warning as error.
-    args.push_back(L"-Zi"); // Debug info
     if (debug)
     {
+        args.push_back(L"-Zi");           // Debug info
         args.push_back(L"-Qembed_debug"); // Embed debug info into the shader
         args.push_back(L"-Od");           // Disable optimization
     }
@@ -288,9 +291,9 @@ bool PTShaderLibrary::linkLibrary(const vector<ComPtr<IDxcBlob>>& input,
     // Build vector of argument flags to pass to compiler.
     vector<const wchar_t*> args;
     args.push_back(L"-WX"); // Warning as error.
-    args.push_back(L"-Zi"); // Debug info
     if (debug)
     {
+        args.push_back(L"-Zi");           // Debug info
         args.push_back(L"-Qembed_debug"); // Embed debug info into the shader
         args.push_back(L"-Od");           // Disable optimization
     }
@@ -411,7 +414,7 @@ void PTShaderLibrary::initRootSignatures(int globalTextureCount, int globalSampl
     globalRootParameters[10].InitAsShaderResourceView(
         7); // gLayerGeometryBuffer: UVs for geometry layers.
     globalRootParameters[11].InitAsShaderResourceView(
-        8); // gTransformMatrixBuffer: Tranform matrices for all instances.
+        8); // gTransformMatrixBuffer: Transform matrices for all instances.
 
     texRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, globalTextureCount,
         9); // gGlobalMaterialTextures: Global scene textures.
@@ -512,8 +515,7 @@ private:
 
 void PTShaderLibrary::initialize()
 {
-
-    // Create a static block from the precomplied main entry point DXIL.
+    // Create a static block from the precompiled main entry point DXIL.
     _pDefaultShaderDXIL.Attach(new StaticBlob(g_sMainEntryPointsDXIL.data(),
         g_sMainEntryPointsDXIL.size() * sizeof(g_sMainEntryPointsDXIL[0])));
 
@@ -524,11 +526,13 @@ void PTShaderLibrary::initialize()
 
     // Always use runtime compiled evaluateMaterialForShader.
     // TODO: Use pre-compiled default version when only default shader is used in scene.
-    _options.set("RUNTIME_COMPILE_EVALUATE_MATERIAL_FUNCTION", 1);
+    _options.set("ENABLE_RUNTIME_COMPILE_EVALUATE_MATERIAL_FUNCTION", 1);
+    // Disable validation of texture indices unless debugging for development purposes.
+    _options.set("ENABLE_VALIDATE_TEXTURE_INDICES", 0);
 
     _optionsSource = _options.toHLSL();
 
-    // Create an emptry array of Slang transpilers.
+    // Create an empty array of Slang transpilers.
     _transpilerArray = {};
 
     // Clear the source and built ins vector. Not strictly needed, but this function could be called
@@ -536,7 +540,7 @@ void PTShaderLibrary::initialize()
     _compiledShaders.clear();
     _builtInMaterialNames = {};
 
-    // Create source code for the default shader, containg the main entry points used for all
+    // Create source code for the default shader, containing the main entry points used for all
     // shaders..
     MaterialShaderSource defaultMaterialSource("Default", CommonShaders::g_sMainEntryPoints);
 
@@ -591,9 +595,11 @@ void PTShaderLibrary::setupCompileJobForShader(const MaterialShader& shader, Com
     // Add shared common code.
     auto& source = shader.definition().source;
 
-    jobOut.code += "#include \"Options.slang\"\n";
+    jobOut.code += R"(
+#include "Options.slang"
+#include "Definitions.slang"
 
-    jobOut.code += "#include \"Definitions.slang\"\n\n";
+)";
 
     jobOut.code += source.setup;
 
@@ -622,13 +628,13 @@ void PTShaderLibrary::generateEvaluateMaterialFunction(CompileJob& job)
     job.code = "#include \"Material.slang\"\n";
     job.code += "#include \"Geometry.slang\"\n";
 
-    // Add declartion for default evaluate material function.
+    // Add declaration for default evaluate material function.
     job.code +=
-        "Material evaluateDefaultMaterial(ShadingData shading, int offset, out float3 "
+        "Material evaluateDefaultMaterial(ShadingData shading, int offset, inout float3 "
         "materialNormal, out bool isGeneratedNormal);\n";
 
     // Add declaration for each of the runtime compiled evaluate material functions (these will be
-    // compiled seperately and linked in.)
+    // compiled separately and linked in.)
     for (int i = 1; i < _compiledShaders.size(); i++)
     {
         auto& compiledShader = _compiledShaders[i];
@@ -637,11 +643,11 @@ void PTShaderLibrary::generateEvaluateMaterialFunction(CompileJob& job)
 
     // Add evaluate function definition.
     job.code += R""""(
-    export Material evaluateMaterialForShader(int shaderIndex, ShadingData shading, int offset, out float3 materialNormal,
+    export Material evaluateMaterialForShader(int shaderIndex, ShadingData shading, int offset, inout float3 materialNormal,
         out bool isGeneratedNormal) {
 )"""";
 
-    // If there are multiple shaders to choose from, add a switch statment.
+    // If there are multiple shaders to choose from, add a switch statement.
     if (_compiledShaders.size() > 1)
     {
         job.code += R""""(
@@ -811,17 +817,28 @@ void PTShaderLibrary::rebuild(int globalTextureCount, int globalSamplerCount)
     }
     float scEnd = _timer.elapsed();
 
+    // Cache main shader binaries to avoid entry point conflicts caused by retranspiling same shader
+    // string.
+#if AU_DEV_MULTITHREAD_COMPILATION
+    static tbb::concurrent_unordered_map<string, ComPtr<IDxcBlob>> shaderBinaryCache = {
+        { _defaultOptions, _pDefaultShaderDXIL }
+    };
+#else
+    static unordered_map<string, ComPtr<IDxcBlob>> shaderBinaryCache = { { _defaultOptions,
+        _pDefaultShaderDXIL } };
+#endif
+
     // Transpilation and DXC Compile function is called from parallel threads.
     auto compileFunc = [this, &evaluateMaterialBinary](CompileJob& job) {
-        // If this is the default shader and no shader options have been changed, use the
-        // precompiled version.
-        if (job.index == kDefaultShaderIndex && _defaultOptions.compare(_optionsSource) == 0)
+        // If this is the default shader and shader options have not been changed or already
+        // compiled, use the cached binary and return without running the compiler.
+        if (job.index == kDefaultShaderIndex)
         {
-            // Set the compiled shader's binary to the pre-compiled DXIL blob.
-            _compiledShaders[job.index].binary = _pDefaultShaderDXIL;
-
-            // Return without running the compiler.
-            return;
+            if (auto iter = shaderBinaryCache.find(_optionsSource); iter != shaderBinaryCache.end())
+            {
+                _compiledShaders[job.index].binary = iter->second;
+                return;
+            }
         }
 
 #if AU_DEV_DUMP_INDIVIDUAL_COMPILATION_TIME
@@ -858,20 +875,6 @@ void PTShaderLibrary::rebuild(int globalTextureCount, int globalSamplerCount)
             AU_FAIL("Slang transpiling failed, see log in console for details.");
         }
 
-        // Fix up the entry points (Slang will remove all the [shader] tags except one. So we need
-        // to re-add them.
-        for (int i = 0; i < job.entryPoints.size(); i++)
-        {
-            // Build the code to search for and version with [shader] prefixed.
-            string entryPointCode = "void " + job.entryPoints[i].second;
-            string entryPointCodeWithTag =
-                "[shader(\"" + job.entryPoints[i].first + "\")] " + entryPointCode;
-
-            // Run the regex to replace add the tag to the transpiled HLSL source.
-            transpiledHLSL = regex_replace(
-                transpiledHLSL, regex("\n" + entryPointCode), "\n" + entryPointCodeWithTag);
-        }
-
         // If development flag set dump transpiled library to a file.
         if (AU_DEV_DUMP_TRANSPILED_CODE)
         {
@@ -905,11 +908,19 @@ void PTShaderLibrary::rebuild(int globalTextureCount, int globalSamplerCount)
                 job.libName.c_str());
         }
 
-        // Set the compiled binary in the compiled shader obect for this shader.
+        // Set the compiled binary in the compiled shader object for this shader.
         if (job.index < 0)
+        {
             evaluateMaterialBinary = compiledShader;
+        }
         else
+        {
             _compiledShaders[job.index].binary = compiledShader;
+            if (job.index == kDefaultShaderIndex)
+            {
+                shaderBinaryCache[_optionsSource] = compiledShader;
+            }
+        }
 
 #if AU_DEV_DUMP_INDIVIDUAL_COMPILATION_TIME
         float jobEnd = _timer.elapsed();
@@ -985,7 +996,7 @@ void PTShaderLibrary::rebuild(int globalTextureCount, int globalSamplerCount)
     CD3DX12_STATE_OBJECT_DESC pipelineStateDesc(D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE);
 
     // Create a pipeline configuration subobject, which simply specifies the recursion depth.
-    // NOTE: The recursion depth is set to 1 as we are using a non-recusive model with entire path
+    // NOTE: The recursion depth is set to 1 as we are using a non-recursive model with entire path
     // traced in the ray generation shader without recursion.
     auto* pPipelineConfigSubobject =
         pipelineStateDesc.CreateSubobject<CD3DX12_RAYTRACING_PIPELINE_CONFIG_SUBOBJECT>();

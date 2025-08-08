@@ -1,4 +1,4 @@
-// Copyright 2023 Autodesk, Inc.
+// Copyright 2025 Autodesk, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -54,7 +54,7 @@ public:
     // rendered in the frame.
     // NOTE: It is possible (though unlikely) for rendering to be restarted _and_ completed in a
     // single frame. The order of the operations in this function accounts for that.
-    void endFrame(bool isComplete, int sampleCount)
+    float endFrame(bool isComplete, int sampleCount)
     {
         // If rendering was *previously* complete, this frame is likely to be happening long after
         // the previous status update, i.e. the application was idle. In that case, reset the
@@ -80,7 +80,7 @@ public:
         float statusDuration = statusTime - _statusLastTime;
         if (statusDuration < _statusInterval && !_isComplete)
         {
-            return;
+            return 0;
         }
 
         // Start building a status report string, starting with the current completed samples.
@@ -97,7 +97,7 @@ public:
         {
             // Collect performance stats for the total work performed to complete rendering.
             float durationInSeconds = _totalTimer.elapsed() / 1000.0f;
-
+            _totalTimer.suspend();
             // Add them to the report string.
             report << "  |  " << durationInSeconds << " s";
         }
@@ -126,6 +126,8 @@ public:
         _statusFrames   = 0;
         _statusSamples  = 0;
         _statusLastTime = statusTime;
+        
+        return _totalTimer.elapsed();
     }
 
 private:
