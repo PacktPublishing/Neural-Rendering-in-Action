@@ -27,14 +27,14 @@
 //   - Simple (UV gradient): Fast, modifies tangent buffer in-place, no vertex splitting
 //   - MikkTSpace: High-quality, may split vertices at UV seams or mirrored UVs
 //
-// @param model         The glTF model to modify (in-place)
-// @param forceCreation If true, creates tangents even for primitives that already have them
-// @param mikktspace    If true, uses MikkTSpace algorithm; otherwise uses simple UV gradient
+// model:         The glTF model to modify (in-place)
+// forceCreation: If true, creates tangents even for primitives that already have them
+// mikktspace:    If true, uses MikkTSpace algorithm; otherwise uses simple UV gradient
 //
-// @return true if vertex splitting occurred (buffers grew), requiring full scene recreation:
-//         - Destroy SceneVk/SceneRtx
-//         - Call scene.setCurrentScene() to re-parse
-//         - Call createVulkanScene()
-//         - Update UI scene graph
+// Returns true if vertex splitting occurred (buffers grew), requiring full scene recreation:
+//   - Destroy SceneVk/SceneRtx
+//   - Call scene.setCurrentScene() to re-parse
+//   - Call createVulkanScene()
+//   - Update UI scene graph
 //--------------------------------------------------------------------------------------------------
 bool recomputeTangents(tinygltf::Model& model, bool forceCreation, bool mikktspace);

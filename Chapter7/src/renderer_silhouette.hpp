@@ -39,7 +39,11 @@ public:
   void init(Resources& res);
   void deinit(Resources& res);
 
-  void dispatch(VkCommandBuffer cmd, const VkExtent2D& imgSize, std::vector<VkDescriptorImageInfo>& imageDescriptors);
+  void dispatch(VkCommandBuffer                     cmd,
+                const VkExtent2D&                   imgSize,
+                std::vector<VkDescriptorImageInfo>& imageDescriptors,
+                const VkDescriptorBufferInfo&       selectionBitMaskBufferInfo,
+                uint32_t                            selectionBitMaskWordCount);
   void setColor(glm::vec3 color);
 
 private:

@@ -49,6 +49,7 @@
 */
 //////////////////////////////////////////////////////////////////////////
 
+#include <cstdlib>
 #include <mikktspace.h>
 #include <tinygltf/tiny_gltf.h>
 #include <vector>
@@ -61,8 +62,8 @@
 #include <nvutils/logger.hpp>
 #include "tinygltf_utils.hpp"
 
-#include "compact_model.hpp"
-
+#include "gltf_compact_model.hpp"
+#include "gltf_create_tangent.hpp"
 
 //==================================================================================================
 // DATA STRUCTURES
@@ -108,31 +109,49 @@ static int mikkGetNumVerticesOfFace(const SMikkTSpaceContext* ctx, int iFace)
 
 static void mikkGetPosition(const SMikkTSpaceContext* ctx, float outPos[], int iFace, int iVert)
 {
-  auto*       data = static_cast<MikkContext*>(ctx->m_pUserData);
-  uint32_t    idx  = data->indices[iFace * 3 + iVert];
-  const auto& v    = data->vertices[idx];
-  outPos[0]        = v.position.x;
-  outPos[1]        = v.position.y;
-  outPos[2]        = v.position.z;
+  outPos[0] = outPos[1] = outPos[2] = 0.0f;
+  auto*  data                       = static_cast<MikkContext*>(ctx->m_pUserData);
+  size_t flatIdx                    = static_cast<size_t>(iFace) * 3 + iVert;
+  if(flatIdx >= data->indices.size())
+    return;
+  uint32_t idx = data->indices[flatIdx];
+  if(idx >= data->vertices.size())
+    return;
+  const auto& v = data->vertices[idx];
+  outPos[0]     = v.position.x;
+  outPos[1]     = v.position.y;
+  outPos[2]     = v.position.z;
 }
 
 static void mikkGetNormal(const SMikkTSpaceContext* ctx, float outNorm[], int iFace, int iVert)
 {
-  auto*       data = static_cast<MikkContext*>(ctx->m_pUserData);
-  uint32_t    idx  = data->indices[iFace * 3 + iVert];
-  const auto& v    = data->vertices[idx];
-  outNorm[0]       = v.normal.x;
-  outNorm[1]       = v.normal.y;
-  outNorm[2]       = v.normal.z;
+  outNorm[0] = outNorm[1] = outNorm[2] = 0.0f;
+  auto*  data                          = static_cast<MikkContext*>(ctx->m_pUserData);
+  size_t flatIdx                       = static_cast<size_t>(iFace) * 3 + iVert;
+  if(flatIdx >= data->indices.size())
+    return;
+  uint32_t idx = data->indices[flatIdx];
+  if(idx >= data->vertices.size())
+    return;
+  const auto& v = data->vertices[idx];
+  outNorm[0]    = v.normal.x;
+  outNorm[1]    = v.normal.y;
+  outNorm[2]    = v.normal.z;
 }
 
 static void mikkGetTexCoord(const SMikkTSpaceContext* ctx, float outUV[], int iFace, int iVert)
 {
-  auto*       data = static_cast<MikkContext*>(ctx->m_pUserData);
-  uint32_t    idx  = data->indices[iFace * 3 + iVert];
-  const auto& v    = data->vertices[idx];
-  outUV[0]         = v.texcoord0.x;
-  outUV[1]         = v.texcoord0.y;
+  outUV[0] = outUV[1] = 0.0f;
+  auto*  data         = static_cast<MikkContext*>(ctx->m_pUserData);
+  size_t flatIdx      = static_cast<size_t>(iFace) * 3 + iVert;
+  if(flatIdx >= data->indices.size())
+    return;
+  uint32_t idx = data->indices[flatIdx];
+  if(idx >= data->vertices.size())
+    return;
+  const auto& v = data->vertices[idx];
+  outUV[0]      = v.texcoord0.x;
+  outUV[1]      = v.texcoord0.y;
 }
 
 static void mikkSetTSpaceBasic(const SMikkTSpaceContext* ctx, const float tangent[], float sign, int iFace, int iVert)
@@ -296,6 +315,230 @@ static void readVertices(const tinygltf::Model& model, const tinygltf::Primitive
 
 
 //==================================================================================================
+// VERTEX SPLITTING & WRITE-BACK
+//==================================================================================================
+
+struct SplitVertex
+{
+  uint32_t  origIdx;
+  glm::vec4 tangent;
+};
+
+// Per-attribute arrays produced by buildVertexArraysFromSplitData; consumed by writePrimitiveBuffers.
+struct SplitVertexArrays
+{
+  std::vector<glm::vec3>    positions;
+  std::vector<glm::vec3>    normals;
+  std::vector<glm::vec4>    tangents;
+  std::vector<glm::vec2>    texcoord0;
+  std::vector<glm::vec2>    texcoord1;
+  std::vector<glm::vec4>    colors;
+  std::vector<glm::vec4>    weights;
+  std::vector<glm::u16vec4> joints;
+  std::vector<uint32_t>     indices;
+  bool                      hasUV1     = false;
+  bool                      hasColor   = false;
+  bool                      hasWeights = false;
+  bool                      hasJoints  = false;
+};
+
+// Append raw data to buffer[0], creating a new BufferView + Accessor. Returns accessor index.
+static int appendToBuffer(tinygltf::Model& model, const void* data, size_t dataBytes, int componentType, int glType, size_t count)
+{
+  if(model.buffers.empty())
+    model.buffers.emplace_back();
+
+  tinygltf::Buffer& buf = model.buffers[0];
+
+  if(data == nullptr && dataBytes != 0)
+  {
+    LOGE("appendToBuffer: data is nullptr but dataBytes is non-zero\n");
+    std::abort();
+  }
+
+  size_t currentOffset = buf.data.size();
+  size_t padding       = (4 - (currentOffset % 4)) % 4;
+  buf.data.resize(currentOffset + padding);
+  size_t dataOffset = buf.data.size();
+
+  tinygltf::BufferView bv;
+  bv.buffer     = 0;
+  bv.byteOffset = dataOffset;
+  bv.byteLength = dataBytes;
+  bv.byteStride = 0;
+  int bvIndex   = static_cast<int>(model.bufferViews.size());
+  model.bufferViews.push_back(bv);
+
+  buf.data.resize(dataOffset + dataBytes);
+  if(dataBytes != 0)
+    std::memcpy(buf.data.data() + dataOffset, data, dataBytes);
+
+  tinygltf::Accessor acc;
+  acc.bufferView    = bvIndex;
+  acc.byteOffset    = 0;
+  acc.componentType = componentType;
+  acc.type          = glType;
+  acc.count         = count;
+  int accIndex      = static_cast<int>(model.accessors.size());
+  model.accessors.push_back(acc);
+
+  return accIndex;
+}
+
+// Group face-vertices by tangent compatibility and compute fv -> new vertex index.
+// Returns (fvToNewVertex, newVertexData).
+static std::pair<std::vector<uint32_t>, std::vector<SplitVertex>> computeTangentGroupsAndMapping(
+    const MikkContext&                        mikkData,
+    const std::vector<std::vector<uint32_t>>& fvIndicesPerVertex,
+    size_t                                    numOrigVerts)
+{
+  std::vector<uint32_t>    fvToNewVertex(mikkData.indices.size());
+  std::vector<SplitVertex> newVertexData;
+  newVertexData.reserve(numOrigVerts * 2);
+
+  for(size_t origV = 0; origV < numOrigVerts; origV++)
+  {
+    const auto& fvList = fvIndicesPerVertex[origV];
+    if(fvList.empty())
+      continue;
+
+    std::vector<std::pair<uint32_t, std::vector<uint32_t>>> tangentGroups;
+
+    for(uint32_t fvIdx : fvList)
+    {
+      const glm::vec4& tangent = mikkData.faceVertexTangents[fvIdx];
+
+      bool found = false;
+      for(auto& tangentGroup : tangentGroups)
+      {
+        if(areTangentsCompatible(newVertexData[tangentGroup.first].tangent, tangent))
+        {
+          tangentGroup.second.push_back(fvIdx);
+          found = true;
+          break;
+        }
+      }
+
+      if(!found)
+      {
+        uint32_t newIdx = static_cast<uint32_t>(newVertexData.size());
+        newVertexData.push_back({static_cast<uint32_t>(origV), tangent});
+        tangentGroups.push_back({newIdx, {fvIdx}});
+      }
+    }
+
+    for(const auto& tangentGroup : tangentGroups)
+      for(uint32_t fvIdx : tangentGroup.second)
+        fvToNewVertex[fvIdx] = tangentGroup.first;
+  }
+
+  return {std::move(fvToNewVertex), std::move(newVertexData)};
+}
+
+// Build vertex attribute arrays from split data and original vertices.
+static void buildVertexArraysFromSplitData(const std::vector<SplitVertex>&    newVertexData,
+                                           const std::vector<OriginalVertex>& origVertices,
+                                           const std::vector<uint32_t>&       fvToNewVertex,
+                                           const tinygltf::Primitive&         prim,
+                                           SplitVertexArrays&                 out)
+{
+  const size_t newVertCount = newVertexData.size();
+  out.positions.resize(newVertCount);
+  out.normals.resize(newVertCount);
+  out.tangents.resize(newVertCount);
+  out.texcoord0.resize(newVertCount);
+
+  out.hasUV1     = prim.attributes.count("TEXCOORD_1") > 0;
+  out.hasColor   = prim.attributes.count("COLOR_0") > 0;
+  out.hasWeights = prim.attributes.count("WEIGHTS_0") > 0;
+  out.hasJoints  = prim.attributes.count("JOINTS_0") > 0;
+
+  if(out.hasUV1)
+    out.texcoord1.resize(newVertCount);
+  if(out.hasColor)
+    out.colors.resize(newVertCount);
+  if(out.hasWeights)
+    out.weights.resize(newVertCount);
+  if(out.hasJoints)
+    out.joints.resize(newVertCount);
+
+  for(size_t i = 0; i < newVertCount; i++)
+  {
+    const SplitVertex&    nv   = newVertexData[i];
+    const OriginalVertex& orig = origVertices[nv.origIdx];
+
+    out.positions[i] = orig.position;
+    out.normals[i]   = orig.normal;
+    out.tangents[i]  = nv.tangent;
+    out.texcoord0[i] = orig.texcoord0;
+
+    if(out.hasUV1)
+      out.texcoord1[i] = orig.texcoord1;
+    if(out.hasColor)
+      out.colors[i] = orig.color;
+    if(out.hasWeights)
+      out.weights[i] = orig.weights;
+    if(out.hasJoints)
+      out.joints[i] = orig.joints;
+  }
+
+  out.indices.resize(fvToNewVertex.size());
+  for(size_t fv = 0; fv < fvToNewVertex.size(); fv++)
+    out.indices[fv] = fvToNewVertex[fv];
+}
+
+// Write vertex arrays and index buffer to model and set primitive attributes/indices.
+static void writePrimitiveBuffers(tinygltf::Model& model, tinygltf::Primitive& prim, const SplitVertexArrays& arrays)
+{
+  prim.attributes["POSITION"] = appendToBuffer(model, arrays.positions.data(), arrays.positions.size() * sizeof(glm::vec3),
+                                               TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC3, arrays.positions.size());
+  prim.attributes["NORMAL"]  = appendToBuffer(model, arrays.normals.data(), arrays.normals.size() * sizeof(glm::vec3),
+                                              TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC3, arrays.normals.size());
+  prim.attributes["TANGENT"] = appendToBuffer(model, arrays.tangents.data(), arrays.tangents.size() * sizeof(glm::vec4),
+                                              TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC4, arrays.tangents.size());
+  prim.attributes["TEXCOORD_0"] = appendToBuffer(model, arrays.texcoord0.data(), arrays.texcoord0.size() * sizeof(glm::vec2),
+                                                 TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC2, arrays.texcoord0.size());
+
+  if(arrays.hasUV1)
+    prim.attributes["TEXCOORD_1"] =
+        appendToBuffer(model, arrays.texcoord1.data(), arrays.texcoord1.size() * sizeof(glm::vec2),
+                       TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC2, arrays.texcoord1.size());
+  if(arrays.hasColor)
+    prim.attributes["COLOR_0"] = appendToBuffer(model, arrays.colors.data(), arrays.colors.size() * sizeof(glm::vec4),
+                                                TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC4, arrays.colors.size());
+  if(arrays.hasWeights)
+    prim.attributes["WEIGHTS_0"] = appendToBuffer(model, arrays.weights.data(), arrays.weights.size() * sizeof(glm::vec4),
+                                                  TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC4, arrays.weights.size());
+  if(arrays.hasJoints)
+    prim.attributes["JOINTS_0"] =
+        appendToBuffer(model, arrays.joints.data(), arrays.joints.size() * sizeof(glm::u16vec4),
+                       TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT, TINYGLTF_TYPE_VEC4, arrays.joints.size());
+
+  prim.indices = appendToBuffer(model, arrays.indices.data(), arrays.indices.size() * sizeof(uint32_t),
+                                TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT, TINYGLTF_TYPE_SCALAR, arrays.indices.size());
+}
+
+// Smart vertex splitting: duplicates only those vertices whose face-vertex tangents are incompatible,
+// then writes the new geometry (all vertex attributes + index buffer) back to the model.
+static bool splitAndWriteVertices(tinygltf::Model&                          model,
+                                  tinygltf::Primitive&                      prim,
+                                  const MikkContext&                        mikkData,
+                                  const std::vector<std::vector<uint32_t>>& fvIndicesPerVertex,
+                                  size_t                                    numOrigVerts)
+{
+  auto [fvToNewVertex, newVertexData] = computeTangentGroupsAndMapping(mikkData, fvIndicesPerVertex, numOrigVerts);
+
+  LOGI("MikkTSpace: Vertices %zu -> %zu (split %zu for tangent discontinuities)\n", numOrigVerts, newVertexData.size(),
+       newVertexData.size() - numOrigVerts);
+
+  SplitVertexArrays arrays;
+  buildVertexArraysFromSplitData(newVertexData, mikkData.vertices, fvToNewVertex, prim, arrays);
+  writePrimitiveBuffers(model, prim, arrays);
+
+  return true;
+}
+
+//==================================================================================================
 // MIKKTSPACE TANGENT GENERATION
 //==================================================================================================
 
@@ -399,196 +642,7 @@ static bool createTangentsMikkTSpace(tinygltf::Model& model, tinygltf::Primitive
   }
 
   // --- Step 4b: Slow path - smart vertex splitting ---
-  // Only duplicate vertices that have incompatible tangents. Vertices with compatible
-  // tangents across all their faces can share a single vertex slot.
-
-  // Track which original attributes are present
-  bool hasUV1     = prim.attributes.count("TEXCOORD_1") > 0;
-  bool hasColor   = prim.attributes.count("COLOR_0") > 0;
-  bool hasWeights = prim.attributes.count("WEIGHTS_0") > 0;
-  bool hasJoints  = prim.attributes.count("JOINTS_0") > 0;
-
-  // For each face-vertex, determine which new vertex index it maps to
-  // Initially, all face-vertices pointing to the same original vertex share it
-  std::vector<uint32_t> fvToNewVertex(mikkData.indices.size());
-
-  // newVertexData[i] = {original vertex index, tangent to use}
-  struct NewVertex
-  {
-    uint32_t  origIdx;
-    glm::vec4 tangent;
-  };
-  std::vector<NewVertex> newVertexData;
-  newVertexData.reserve(numOrigVerts * 2);  // Estimate: some splitting
-
-  // Process each original vertex and its face-vertices
-  for(size_t origV = 0; origV < numOrigVerts; origV++)
-  {
-    const auto& fvList = fvIndicesPerVertex[origV];
-    if(fvList.empty())
-      continue;
-
-    // Group face-vertices by compatible tangents
-    // Each group shares a single new vertex
-    std::vector<std::pair<uint32_t, std::vector<uint32_t>>> tangentGroups;  // {splitVertexIdx, compatibleFvIndices}
-
-    for(uint32_t fvIdx : fvList)
-    {
-      const glm::vec4& tangent = mikkData.faceVertexTangents[fvIdx];
-
-      // Find a compatible group
-      bool found = false;
-      for(auto& tangentGroup : tangentGroups)
-      {
-        if(areTangentsCompatible(newVertexData[tangentGroup.first].tangent, tangent))
-        {
-          tangentGroup.second.push_back(fvIdx);
-          found = true;
-          break;
-        }
-      }
-
-      if(!found)
-      {
-        // Create new vertex for this tangent
-        uint32_t newIdx = static_cast<uint32_t>(newVertexData.size());
-        newVertexData.push_back({static_cast<uint32_t>(origV), tangent});
-        tangentGroups.push_back({newIdx, {fvIdx}});
-      }
-    }
-
-    // Assign new vertex indices to face-vertices
-    for(const auto& tangentGroup : tangentGroups)
-    {
-      for(uint32_t fvIdx : tangentGroup.second)
-      {
-        fvToNewVertex[fvIdx] = tangentGroup.first;
-      }
-    }
-  }
-
-  LOGI("MikkTSpace: Vertices %zu -> %zu (split %zu for tangent discontinuities)\n", numOrigVerts, newVertexData.size(),
-       newVertexData.size() - numOrigVerts);
-
-  // Build new vertex arrays
-  const size_t              newVertCount = newVertexData.size();
-  std::vector<glm::vec3>    newPositions(newVertCount);
-  std::vector<glm::vec3>    newNormals(newVertCount);
-  std::vector<glm::vec4>    newTangents(newVertCount);
-  std::vector<glm::vec2>    newTexcoord0(newVertCount);
-  std::vector<glm::vec2>    newTexcoord1;
-  std::vector<glm::vec4>    newColors;
-  std::vector<glm::vec4>    newWeights;
-  std::vector<glm::u16vec4> newJoints;
-
-  if(hasUV1)
-    newTexcoord1.resize(newVertCount);
-  if(hasColor)
-    newColors.resize(newVertCount);
-  if(hasWeights)
-    newWeights.resize(newVertCount);
-  if(hasJoints)
-    newJoints.resize(newVertCount);
-
-  // Fill new vertex data
-  for(size_t i = 0; i < newVertCount; i++)
-  {
-    const NewVertex&      nv   = newVertexData[i];
-    const OriginalVertex& orig = mikkData.vertices[nv.origIdx];
-
-    newPositions[i] = orig.position;
-    newNormals[i]   = orig.normal;
-    newTangents[i]  = nv.tangent;
-    newTexcoord0[i] = orig.texcoord0;
-
-    if(hasUV1)
-      newTexcoord1[i] = orig.texcoord1;
-    if(hasColor)
-      newColors[i] = orig.color;
-    if(hasWeights)
-      newWeights[i] = orig.weights;
-    if(hasJoints)
-      newJoints[i] = orig.joints;
-  }
-
-  // Build new index buffer
-  std::vector<uint32_t> newIndices(mikkData.indices.size());
-  for(size_t fv = 0; fv < mikkData.indices.size(); fv++)
-  {
-    newIndices[fv] = fvToNewVertex[fv];
-  }
-
-  // --- Step 5: Write new geometry to model ---
-  // NOTE: We append new data to the buffer rather than replacing in-place because:
-  // 1. The new vertex count may differ from the original
-  // 2. Other primitives may share the same buffer views
-  // The old data becomes orphaned but this is acceptable for runtime tangent generation.
-  // TinyGLTF does not compact orphaned data when saving.
-
-  tinygltf::Buffer& buf = model.buffers[0];
-
-  // Helper to add data to buffer and create accessor
-  auto addBufferData = [&](const void* data, size_t dataBytes, int componentType, int glType, size_t count) -> int {
-    // Align to 4 bytes
-    size_t currentOffset = buf.data.size();
-    size_t padding       = (4 - (currentOffset % 4)) % 4;
-    buf.data.resize(currentOffset + padding);
-    size_t dataOffset = buf.data.size();
-
-    // Create buffer view
-    tinygltf::BufferView bv;
-    bv.buffer     = 0;
-    bv.byteOffset = dataOffset;
-    bv.byteLength = dataBytes;
-    bv.byteStride = 0;  // Tightly packed
-    int bvIndex   = static_cast<int>(model.bufferViews.size());
-    model.bufferViews.push_back(bv);
-
-    // Append data
-    buf.data.resize(dataOffset + dataBytes);
-    std::memcpy(buf.data.data() + dataOffset, data, dataBytes);
-
-    // Create accessor
-    tinygltf::Accessor acc;
-    acc.bufferView    = bvIndex;
-    acc.byteOffset    = 0;
-    acc.componentType = componentType;
-    acc.type          = glType;
-    acc.count         = count;
-    int accIndex      = static_cast<int>(model.accessors.size());
-    model.accessors.push_back(acc);
-
-    return accIndex;
-  };
-
-  // Write all vertex attributes to buffer
-  prim.attributes["POSITION"]   = addBufferData(newPositions.data(), newPositions.size() * sizeof(glm::vec3),
-                                                TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC3, newPositions.size());
-  prim.attributes["NORMAL"]     = addBufferData(newNormals.data(), newNormals.size() * sizeof(glm::vec3),
-                                                TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC3, newNormals.size());
-  prim.attributes["TANGENT"]    = addBufferData(newTangents.data(), newTangents.size() * sizeof(glm::vec4),
-                                                TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC4, newTangents.size());
-  prim.attributes["TEXCOORD_0"] = addBufferData(newTexcoord0.data(), newTexcoord0.size() * sizeof(glm::vec2),
-                                                TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC2, newTexcoord0.size());
-
-  if(hasUV1)
-    prim.attributes["TEXCOORD_1"] = addBufferData(newTexcoord1.data(), newTexcoord1.size() * sizeof(glm::vec2),
-                                                  TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC2, newTexcoord1.size());
-  if(hasColor)
-    prim.attributes["COLOR_0"] = addBufferData(newColors.data(), newColors.size() * sizeof(glm::vec4),
-                                               TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC4, newColors.size());
-  if(hasWeights)
-    prim.attributes["WEIGHTS_0"] = addBufferData(newWeights.data(), newWeights.size() * sizeof(glm::vec4),
-                                                 TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC4, newWeights.size());
-  if(hasJoints)
-    prim.attributes["JOINTS_0"] = addBufferData(newJoints.data(), newJoints.size() * sizeof(glm::u16vec4),
-                                                TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT, TINYGLTF_TYPE_VEC4, newJoints.size());
-
-  // Write index buffer
-  prim.indices = addBufferData(newIndices.data(), newIndices.size() * sizeof(uint32_t),
-                               TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT, TINYGLTF_TYPE_SCALAR, newIndices.size());
-
-  return true;  // Splitting occurred, buffers grew
+  return splitAndWriteVertices(model, prim, mikkData, fvIndicesPerVertex, numOrigVerts);
 }
 
 //==================================================================================================
