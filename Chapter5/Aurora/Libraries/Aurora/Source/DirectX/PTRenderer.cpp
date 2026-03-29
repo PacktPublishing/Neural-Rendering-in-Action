@@ -819,10 +819,16 @@ void PTRenderer::updateDiffRenderingResources()
     _diffRenderDimensions = _outputDimensions;
     uint32_t numPixels    = _outputDimensions.x * _outputDimensions.y;
 
-    // gPathRecords: flat float4 buffer, DIFF_RECORD_STRIDE float4s per pixel.
-    // 11 float4s * 16 bytes = 176 bytes/pixel. At 1920x1080 = ~360 MB.
-    constexpr uint32_t kDiffRecordStride = 11;
-    size_t pathRecordsSize = static_cast<size_t>(numPixels) * kDiffRecordStride * sizeof(float) * 4;
+    // gPathRecords: per-pixel header (1 float4) + MAX_PATH_BOUNCES bounce records.
+    // Each bounce record is DIFF_RECORD_STRIDE (11) float4s.
+    // Total per pixel = (1 + 4*11) = 45 float4s = 720 bytes/pixel.
+    constexpr uint32_t kMaxPathBounces    = 4;  // must match MAX_PATH_BOUNCES in DiffRenderingConstants.slang
+    constexpr uint32_t kDiffRecordStride  = 11; // must match DIFF_RECORD_STRIDE
+    constexpr uint32_t kDiffPixelHeaderSize = 1; // must match DIFF_PIXEL_HEADER_SIZE
+    constexpr uint32_t kDiffPixelTotalStride =
+        kDiffPixelHeaderSize + kMaxPathBounces * kDiffRecordStride;
+    size_t pathRecordsSize =
+        static_cast<size_t>(numPixels) * kDiffPixelTotalStride * sizeof(float) * 4;
     _pDiffPathRecordsBuffer = createBuffer(pathRecordsSize, "DiffRender PathRecords",
         D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1010,8 +1016,10 @@ void PTRenderer::submitGradientAccum()
     // Begin a command list.
     ID3D12GraphicsCommandList4Ptr pCommandList = beginCommandList();
 
-    // Barrier: wait for RayGenShader to finish writing gPathRecords before the compute shader
-    // reads it.
+    // Barriers: wait for the accumulation shader to finish writing the accumulated image,
+    // and for RayGenShader to finish writing gPathRecords, before the gradient compute shader
+    // reads them.
+    addUAVBarrier(_pTexAccumulation.Get());
     addUAVBarrier(_pDiffPathRecordsBuffer.Get());
 
     // Set up the pipeline for the gradient accumulation compute shader.
@@ -1020,17 +1028,18 @@ void PTRenderer::submitGradientAccum()
     pCommandList->SetPipelineState(_pDiffRenderPipelineState.Get());
 
     // Bind resources. Slot indices match the explicit [RootSignature] in DiffComputeShaders.slang:
-    //   Slot 0: descriptor table — gResult (UAV u0, the rendered direct image)
+    //   Slot 0: descriptor table — gResult (UAV u0, the accumulated N-sample image)
     //   Slot 1: raw UAV — gPathRecords (u10)
     //   Slot 2: raw UAV — gMaterialGrads (u11)
     //   Slot 3: CBV — gDiffRenderConstants (b4)
     //   Slot 4: descriptor table — gTargetImage (SRV t0, space2); uses direct texture as
     //           placeholder until a real target image is provided via the public API.
 
-    // Slot 0: gResult UAV (the direct/rendered output texture).
+    // Slot 0: gResult UAV — bind the accumulated (N-sample averaged) image so the
+    // loss gradient uses the fully-converged render, not a single noisy sample.
     CD3DX12_GPU_DESCRIPTOR_HANDLE resultHandle(
         _pDescriptorHeap->GetGPUDescriptorHandleForHeapStart(),
-        kDirectDescriptorOffset, _handleIncrementSize);
+        kAccumulationDescriptorOffset, _handleIncrementSize);
     pCommandList->SetComputeRootDescriptorTable(0, resultHandle);
 
     // Slot 1: gPathRecords UAV buffer (raw root descriptor).
@@ -1173,11 +1182,6 @@ void PTRenderer::renderInternal(uint32_t sampleStart, uint32_t sampleCount)
         // Perform ray tracing for the current sample.
         submitRayDispatch(dispatchRaysDesc, sampleStart + i, seedOffset);
 
-#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
-        // Perform the backward pass (gradient accumulation) after each forward ray dispatch.
-        submitGradientAccum();
-#endif
-
         // Perform denoising of the diffuse / glossy radiance results.
         // NOTE: This does nothing if denoising is not enabled.
         submitDenoising(isResetHistoryEnabled);
@@ -1186,6 +1190,15 @@ void PTRenderer::renderInternal(uint32_t sampleStart, uint32_t sampleCount)
         // NOTE: This should not use the sample offset, as it needs to know how far along the
         // accumulation has proceeded.
         submitAccumulation(sampleStart + i);
+
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+        // Dispatch the backward pass (gradient accumulation) only on the LAST sample,
+        // AFTER accumulation. This way the gradient shader reads the fully-accumulated
+        // N-sample averaged image for lossGrad, matching what the CPU reads for FD.
+        // Path records are from the last sample (each sample overwrites).
+        if (i == sampleCount - 1)
+            submitGradientAccum();
+#endif
 
         // Complete the task here, because the denoiser itself only supports the same number of
         // tasks and uses one for each sample counter increment.

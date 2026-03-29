@@ -151,6 +151,7 @@ set(COMMON_SHADERS
     "Source/Shaders/StandardSurfaceBSDF.slang"
     "Source/Shaders/Sampling.slang"
     "Source/Shaders/DiffComputeShaders.slang"
+    "Source/Shaders/DiffRenderingConstants.slang"
 )
 
 #  On windows, the version resource and header files that add the version information to the DLL.

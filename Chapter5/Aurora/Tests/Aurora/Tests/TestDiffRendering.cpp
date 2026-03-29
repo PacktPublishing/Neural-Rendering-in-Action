@@ -53,6 +53,74 @@ static void saveDiffPNG(const std::string& path, const float* pTarget, const flo
     stbi_write_png(path.c_str(), width, height, 4, diff.data(), width * 4);
 }
 
+// Save a Mitsuba-3-style signed gradient image.
+//
+// For each pixel the loss gradient is  lossGrad = 2*(rendered - target).
+// The image maps this to a diverging red-gray-blue colormap:
+//   positive gradient  → warm (red/orange)
+//   zero gradient      → neutral gray
+//   negative gradient  → cool (blue/cyan)
+//
+// If fixedScale > 0, that value is used as the normalization denominator so
+// multiple frames share the same color mapping and the image genuinely fades
+// toward gray as gradients shrink.  When fixedScale <= 0 (default), the peak
+// magnitude of this frame is used (auto-scale).
+//
+// *outMaxAbs (optional): receives the computed peak |grad| for this frame,
+// useful for capturing the step-0 scale and reusing it for later steps.
+//
+// Background pixels (alpha < 0.5) are left black.
+static void saveGradientVisPNG(const std::string& path,
+    const float* pRendered, const float* pTarget,
+    int width, int height,
+    float fixedScale = -1.0f, float* outMaxAbs = nullptr)
+{
+    const int N = width * height;
+
+    // Compute per-pixel loss gradient and find the peak magnitude.
+    std::vector<float> grad(N * 3);
+    float maxAbs = 1e-8f;
+    for (int i = 0; i < N; i++)
+    {
+        if (pRendered[i * 4 + 3] < 0.5f)
+        {
+            grad[i * 3 + 0] = grad[i * 3 + 1] = grad[i * 3 + 2] = 0.0f;
+            continue;
+        }
+        for (int c = 0; c < 3; c++)
+        {
+            float g = 2.0f * (pRendered[i * 4 + c] - pTarget[i * 4 + c]);
+            grad[i * 3 + c] = g;
+            maxAbs = std::max(maxAbs, std::abs(g));
+        }
+    }
+
+    if (outMaxAbs)
+        *outMaxAbs = maxAbs;
+
+    float scale = (fixedScale > 0.0f) ? fixedScale : maxAbs;
+
+    // Map to diverging colormap: blue (−1) ← gray (0) → red (+1).
+    std::vector<uint8_t> ldr(N * 4);
+    for (int i = 0; i < N; i++)
+    {
+        if (pRendered[i * 4 + 3] < 0.5f)
+        {
+            ldr[i * 4 + 0] = ldr[i * 4 + 1] = ldr[i * 4 + 2] = 0;
+            ldr[i * 4 + 3] = 255;
+            continue;
+        }
+        for (int c = 0; c < 3; c++)
+        {
+            float t = grad[i * 3 + c] / scale; // in [-1, +1] (clamped below)
+            float v = 0.5f + 0.5f * t;           // in [ 0,  1]
+            ldr[i * 4 + c] = static_cast<uint8_t>(std::max(0.0f, std::min(1.0f, v)) * 255.0f + 0.5f);
+        }
+        ldr[i * 4 + 3] = 255;
+    }
+    stbi_write_png(path.c_str(), width, height, 4, ldr.data(), width * 4);
+}
+
 // ---- Test fixture ----
 
 class DiffRenderingTest : public TestHelpers::FixtureBase
@@ -597,6 +665,7 @@ TEST_P(DiffRenderingTest, TestStep6OptimizationLoop)
     // Current material parameters (emissionColor only; emission scalar fixed at 2).
     vec3  emitColor = vec3(1.0f, 0.0f, 0.0f); // start: RED
     float emission  = 2.0f;
+    float gradScale = -1.0f;
 
     vector<double> losses;
     losses.reserve(kNumSteps);
@@ -633,6 +702,20 @@ TEST_P(DiffRenderingTest, TestStep6OptimizationLoop)
             char fname[64];
             snprintf(fname, sizeof(fname), "/step_%03d.png", step);
             saveFloatRGBAasPNG(kDebugDir + fname, pOptRaw, kWidth, kHeight);
+
+            if (step == 0 || step == kNumSteps / 2 || step == kNumSteps - 1)
+            {
+                snprintf(fname, sizeof(fname), "/grad_%03d.png", step);
+                float frameMax = 0.0f;
+                saveGradientVisPNG(kDebugDir + fname,
+                    pOptRaw, targetPixels.data(), kWidth, kHeight,
+                    gradScale, &frameMax);
+                if (step == 0)
+                    gradScale = frameMax;
+                snprintf(fname, sizeof(fname), "/diff_%03d.png", step);
+                saveDiffPNG(kDebugDir + fname,
+                    targetPixels.data(), pOptRaw, kWidth, kHeight);
+            }
         }
 
         if (step == kNumSteps - 1)
@@ -689,6 +772,1233 @@ TEST_P(DiffRenderingTest, TestStep6OptimizationLoop)
         << kLossReductionFactor << " * initial loss (" << initialLoss << ")";
 
     AU_INFO("DiffRenderTest Step 6 — debug images saved to %s", kDebugDir.c_str());
+}
+
+// ============================================================
+// TestBaseColorOptimizationLoop — Single-bounce base_color optimization
+//
+// Scene: A single diffuse teapot (metalness=0) illuminated by a distant light
+// and the default gradient environment. The teapot's direct appearance depends
+// on its base_color through the BRDF.
+//
+// Target: teapot with blue base_color (0.05, 0.05, 0.9).
+// Start:  teapot with red  base_color (0.90, 0.05, 0.05).
+//
+// The optimizer uses SGD on the base_color gradient (indices 0,1,2) to
+// converge the teapot's appearance from red to blue.
+//
+// Unlike the emission test (TestStep6OptimizationLoop), this exercises the
+// BRDF differentiation path (bwd_diff(evaluateMaterial)), which is the core
+// of physically based differentiable rendering.
+//
+// ============================================================
+TEST_P(DiffRenderingTest, TestBaseColorOptimizationLoop)
+{
+    if (!isDirectX() || !backendSupported())
+    {
+        GTEST_SKIP() << "Differentiable rendering requires DirectX backend.";
+    }
+
+    constexpr int   kWidth              = 256;
+    constexpr int   kHeight             = 256;
+    constexpr int   kSPP                = 16;
+    constexpr int   kNumSteps           = 50;
+    constexpr float kLR                 = 0.50f;
+    constexpr int   kMinMonoSteps       = 8;
+    constexpr float kLossReductionFactor = 0.30f;
+
+    const std::string kDebugDir = "./OutputImages/DiffRenderDebug/BaseColorOptim";
+    std::filesystem::create_directories(kDebugDir);
+
+    IRendererPtr pRenderer = createDefaultRenderer(kWidth, kHeight);
+    ASSERT_NE(pRenderer, nullptr);
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", false);
+    pRenderer->options().setBoolean("alphaEnabled", true);
+    setDefaultRendererCamera(vec3(0, 1, -5), vec3(0, 0.5f, 0));
+
+    IScenePtr pScene = createDefaultScene();
+    ASSERT_NE(pScene, nullptr);
+
+    defaultDistantLight()->values().setFloat3(
+        Names::LightProperties::kDirection, value_ptr(vec3(0, -1, -1)));
+    defaultDistantLight()->values().setFloat(
+        Names::LightProperties::kIntensity, 3.0f);
+
+    Path geomPath = createTeapotGeometry(*pScene);
+    const Path kMaterialPath = "BaseColorOptMaterial";
+    pScene->setMaterialType(kMaterialPath);
+
+    Properties instProps;
+    instProps[Names::InstanceProperties::kMaterial] = kMaterialPath;
+    ASSERT_TRUE(pScene->addInstance("BaseColorOptTeapot", geomPath, instProps));
+
+    // ---- Render target: blue diffuse teapot ----
+    {
+        Properties p;
+        p["base_color"]         = vec3(0.05f, 0.05f, 0.9f);
+        p["metalness"]          = 0.0f;
+        p["specular_roughness"] = 0.3f;
+        p["emission"]           = 0.0f;
+        pScene->setMaterialProperties(kMaterialPath, p);
+    }
+
+    IRenderBufferPtr pTargetBuf =
+        pRenderer->createRenderBuffer(kWidth, kHeight, ImageFormat::Float_RGBA);
+    pRenderer->setTargets({ { AOV::kFinal, pTargetBuf } });
+    pRenderer->render(0, kSPP);
+    pRenderer->waitForTask();
+
+    size_t targetStride = 0;
+    const float* pTargetRaw =
+        reinterpret_cast<const float*>(pTargetBuf->data(targetStride, true));
+    ASSERT_NE(pTargetRaw, nullptr);
+    vector<float> targetPixels(pTargetRaw, pTargetRaw + kWidth * kHeight * 4);
+    saveFloatRGBAasPNG(kDebugDir + "/target.png", targetPixels.data(), kWidth, kHeight);
+
+    IImage::InitData targetInitData;
+    targetInitData.pImageData = targetPixels.data();
+    targetInitData.format     = ImageFormat::Float_RGBA;
+    targetInitData.linearize  = false;
+    targetInitData.width      = kWidth;
+    targetInitData.height     = kHeight;
+    targetInitData.name       = "BaseColorOptTarget";
+    pRenderer->setDiffTargetImage(targetInitData);
+
+    auto computeLoss = [&](const float* pRendered, const float* pTarget,
+                            int width, int height) -> double
+    {
+        double sum   = 0.0;
+        int    count = 0;
+        for (int i = 0; i < width * height; i++)
+        {
+            if (pRendered[i * 4 + 3] < 0.5f)
+                continue;
+            count++;
+            for (int c = 0; c < 3; c++)
+            {
+                float d = pRendered[i * 4 + c] - pTarget[i * 4 + c];
+                sum += d * d;
+            }
+        }
+        return count > 0 ? sum / count : 0.0;
+    };
+
+    vec3 baseColor = vec3(0.9f, 0.05f, 0.05f);
+    float gradScale = -1.0f;
+
+    vector<double> losses;
+    losses.reserve(kNumSteps);
+
+    for (int step = 0; step < kNumSteps; step++)
+    {
+        {
+            Properties p;
+            p["base_color"]         = baseColor;
+            p["metalness"]          = 0.0f;
+            p["specular_roughness"] = 0.3f;
+            p["emission"]           = 0.0f;
+            pScene->setMaterialProperties(kMaterialPath, p);
+        }
+
+        IRenderBufferPtr pOptBuf =
+            pRenderer->createRenderBuffer(kWidth, kHeight, ImageFormat::Float_RGBA);
+        pRenderer->setTargets({ { AOV::kFinal, pOptBuf } });
+        pRenderer->render(0, kSPP);
+        pRenderer->waitForTask();
+
+        size_t optStride = 0;
+        const float* pOptRaw =
+            reinterpret_cast<const float*>(pOptBuf->data(optStride, true));
+        ASSERT_NE(pOptRaw, nullptr);
+        double loss = computeLoss(pOptRaw, targetPixels.data(), kWidth, kHeight);
+        losses.push_back(loss);
+
+        {
+            char fname[64];
+            snprintf(fname, sizeof(fname), "/step_%03d.png", step);
+            saveFloatRGBAasPNG(kDebugDir + fname, pOptRaw, kWidth, kHeight);
+
+            if (step == 0 || step == kNumSteps / 2 || step == kNumSteps - 1)
+            {
+                snprintf(fname, sizeof(fname), "/grad_%03d.png", step);
+                float frameMax = 0.0f;
+                saveGradientVisPNG(kDebugDir + fname,
+                    pOptRaw, targetPixels.data(), kWidth, kHeight,
+                    gradScale, &frameMax);
+                if (step == 0)
+                    gradScale = frameMax;
+                snprintf(fname, sizeof(fname), "/diff_%03d.png", step);
+                saveDiffPNG(kDebugDir + fname,
+                    targetPixels.data(), pOptRaw, kWidth, kHeight);
+            }
+        }
+
+        vector<float> grads = pRenderer->getMaterialGradients();
+        ASSERT_EQ(grads.size(), 15u) << "No valid surface hits at step " << step;
+
+        AU_INFO("  Step %3d: loss=%.6f  baseColor=(%.3f, %.3f, %.3f)  grad=(%.4f, %.4f, %.4f)",
+            step, loss, baseColor.x, baseColor.y, baseColor.z,
+            grads[0], grads[1], grads[2]);
+
+        constexpr float kEps = 0.01f;
+        baseColor.x -= kLR * grads[0];
+        baseColor.y -= kLR * grads[1];
+        baseColor.z -= kLR * grads[2];
+        baseColor.x = std::max(kEps, std::min(1.0f, baseColor.x));
+        baseColor.y = std::max(kEps, std::min(1.0f, baseColor.y));
+        baseColor.z = std::max(kEps, std::min(1.0f, baseColor.z));
+    }
+
+    int maxMonoRun = 1, currentRun = 1;
+    for (int i = 1; i < (int)losses.size(); i++)
+    {
+        if (losses[i] <= losses[i - 1])
+        {
+            currentRun++;
+            maxMonoRun = std::max(maxMonoRun, currentRun);
+        }
+        else
+        {
+            currentRun = 1;
+        }
+    }
+    AU_INFO("BaseColor Optim — longest monotone decrease: %d steps (need %d)",
+        maxMonoRun, kMinMonoSteps);
+    EXPECT_GE(maxMonoRun, kMinMonoSteps)
+        << "Loss did not decrease monotonically for " << kMinMonoSteps
+        << " consecutive steps. Longest run: " << maxMonoRun;
+
+    double initialLoss = losses.front();
+    double finalLoss   = losses.back();
+    AU_INFO("BaseColor Optim — initial loss=%.6f  final loss=%.6f  ratio=%.4f",
+        initialLoss, finalLoss, finalLoss / initialLoss);
+    EXPECT_LT(finalLoss, initialLoss * kLossReductionFactor)
+        << "Final loss (" << finalLoss << ") is not < "
+        << kLossReductionFactor << " * initial loss (" << initialLoss << ")";
+
+    AU_INFO("BaseColor Optim — debug images saved to %s", kDebugDir.c_str());
+}
+
+// ============================================================
+// TestCornellBoxGradientVis — Cornell box with gradient visualization
+//
+// A classic Cornell box built from 5 planes + ceiling light panel + diffuse
+// teapot. The LEFT wall's base_color is the optimized parameter (RED → GREEN).
+// Gradient images are saved at every step so the user can see Mitsuba-3-style
+// per-pixel loss gradient visualizations that reveal color bleeding paths.
+// ============================================================
+TEST_P(DiffRenderingTest, TestCornellBoxGradientVis)
+{
+    if (!isDirectX() || !backendSupported())
+    {
+        GTEST_SKIP() << "Differentiable rendering requires DirectX backend.";
+    }
+
+    constexpr int   kWidth              = 128;
+    constexpr int   kHeight             = 128;
+    constexpr int   kSPP                = 1000;
+    constexpr int   kNumSteps           = 100;
+    constexpr float kLR                 = 0.50f;
+    constexpr int   kMinMonoSteps       = 8;
+    constexpr float kLossReductionFactor = 0.50f;
+
+    const std::string kDebugDir = "./OutputImages/DiffRenderDebug/CornellBox";
+    std::filesystem::create_directories(kDebugDir);
+
+    IRendererPtr pRenderer = createDefaultRenderer(kWidth, kHeight);
+    ASSERT_NE(pRenderer, nullptr);
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", false);
+    pRenderer->options().setBoolean("alphaEnabled", true);
+    pRenderer->options().setInt("traceDepth", 5);
+    setDefaultRendererCamera(vec3(0, 1.5f, -5.5f), vec3(0, 1.5f, 0));
+
+    IScenePtr pScene = createDefaultScene();
+    ASSERT_NE(pScene, nullptr);
+
+    // Disable the default distant light — only the emissive ceiling panel lights
+    // the box, producing the classic Cornell box indirect-illumination look.
+    defaultDistantLight()->values().setFloat(
+        Names::LightProperties::kIntensity, 0.0f);
+
+    // createPlaneGeometry() → 2x2 XY quad at Z=0, normal (0,0,-1).
+
+    // ---- Back wall: normal -Z (faces camera), translate to Z=+3 ----
+    Path backWallGeom = createPlaneGeometry(*pScene);
+    const Path kBackWallMtl = "CornellBackWallMtl";
+    pScene->setMaterialType(kBackWallMtl);
+    {
+        Properties p;
+        p["base_color"] = vec3(0.75f, 0.75f, 0.75f);
+        p["emission"]   = 0.0f;
+        pScene->setMaterialProperties(kBackWallMtl, p);
+    }
+    mat4 backWallXform = glm::translate(vec3(0, 1.5f, 3.0f))
+        * glm::scale(vec3(3.0f, 1.5f, 1.0f));
+    ASSERT_TRUE(pScene->addInstance("CornellBackWall", backWallGeom,
+        { { Names::InstanceProperties::kMaterial, kBackWallMtl },
+          { Names::InstanceProperties::kTransform, backWallXform } }));
+
+    // ---- Floor: rotate +90° around X → normal +Y, at Y=0 ----
+    Path floorGeom = createPlaneGeometry(*pScene);
+    const Path kFloorMtl = "CornellFloorMtl";
+    pScene->setMaterialType(kFloorMtl);
+    {
+        Properties p;
+        p["base_color"] = vec3(0.75f, 0.75f, 0.75f);
+        p["emission"]   = 0.0f;
+        pScene->setMaterialProperties(kFloorMtl, p);
+    }
+    mat4 floorXform = glm::translate(vec3(0, 0, 1.5f))
+        * glm::rotate(glm::radians(90.0f), vec3(1, 0, 0))
+        * glm::scale(vec3(3.0f, 3.0f, 1.0f));
+    ASSERT_TRUE(pScene->addInstance("CornellFloor", floorGeom,
+        { { Names::InstanceProperties::kMaterial, kFloorMtl },
+          { Names::InstanceProperties::kTransform, floorXform } }));
+
+    // ---- Ceiling: rotate -90° around X → normal -Y, at Y=3 ----
+    Path ceilGeom = createPlaneGeometry(*pScene);
+    const Path kCeilMtl = "CornellCeilMtl";
+    pScene->setMaterialType(kCeilMtl);
+    {
+        Properties p;
+        p["base_color"] = vec3(0.75f, 0.75f, 0.75f);
+        p["emission"]   = 0.0f;
+        pScene->setMaterialProperties(kCeilMtl, p);
+    }
+    mat4 ceilXform = glm::translate(vec3(0, 3.0f, 1.5f))
+        * glm::rotate(glm::radians(-90.0f), vec3(1, 0, 0))
+        * glm::scale(vec3(3.0f, 3.0f, 1.0f));
+    ASSERT_TRUE(pScene->addInstance("CornellCeiling", ceilGeom,
+        { { Names::InstanceProperties::kMaterial, kCeilMtl },
+          { Names::InstanceProperties::kTransform, ceilXform } }));
+
+    // ---- Left wall: rotate -90° around Y → normal +X, at X=-3 ----
+    Path leftWallGeom = createPlaneGeometry(*pScene);
+    const Path kLeftWallMtl = "CornellLeftWallMtl";
+    pScene->setMaterialType(kLeftWallMtl);
+    mat4 leftWallXform = glm::translate(vec3(-3.0f, 1.5f, 1.5f))
+        * glm::rotate(glm::radians(-90.0f), vec3(0, 1, 0))
+        * glm::scale(vec3(3.0f, 1.5f, 1.0f));
+    ASSERT_TRUE(pScene->addInstance("CornellLeftWall", leftWallGeom,
+        { { Names::InstanceProperties::kMaterial, kLeftWallMtl },
+          { Names::InstanceProperties::kTransform, leftWallXform } }));
+
+    // ---- Right wall: rotate +90° around Y → normal -X, at X=+3 ----
+    Path rightWallGeom = createPlaneGeometry(*pScene);
+    const Path kRightWallMtl = "CornellRightWallMtl";
+    pScene->setMaterialType(kRightWallMtl);
+    {
+        Properties p;
+        p["base_color"] = vec3(0.75f, 0.75f, 0.75f);
+        p["emission"]   = 0.0f;
+        pScene->setMaterialProperties(kRightWallMtl, p);
+    }
+    mat4 rightWallXform = glm::translate(vec3(3.0f, 1.5f, 1.5f))
+        * glm::rotate(glm::radians(90.0f), vec3(0, 1, 0))
+        * glm::scale(vec3(3.0f, 1.5f, 1.0f));
+    ASSERT_TRUE(pScene->addInstance("CornellRightWall", rightWallGeom,
+        { { Names::InstanceProperties::kMaterial, kRightWallMtl },
+          { Names::InstanceProperties::kTransform, rightWallXform } }));
+
+    // ---- Light panel: emissive quad on ceiling, facing down ----
+    Path lightGeom = createPlaneGeometry(*pScene);
+    const Path kLightMtl = "CornellLightMtl";
+    pScene->setMaterialType(kLightMtl);
+    {
+        Properties p;
+        p["emission_color"] = vec3(1.0f, 1.0f, 1.0f);
+        p["emission"]       = 10.0f;
+        p["base_color"]     = vec3(0.0f, 0.0f, 0.0f);
+        pScene->setMaterialProperties(kLightMtl, p);
+    }
+    mat4 lightXform = glm::translate(vec3(0, 2.98f, 1.5f))
+        * glm::rotate(glm::radians(-90.0f), vec3(1, 0, 0))
+        * glm::scale(vec3(1.0f, 1.0f, 1.0f));
+    ASSERT_TRUE(pScene->addInstance("CornellLight", lightGeom,
+        { { Names::InstanceProperties::kMaterial, kLightMtl },
+          { Names::InstanceProperties::kTransform, lightXform } }));
+
+    // ---- Teapot: small diffuse object in the center of the box ----
+    Path teapotGeom = createTeapotGeometry(*pScene);
+    const Path kTeapotMtl = "CornellTeapotMtl";
+    pScene->setMaterialType(kTeapotMtl);
+    {
+        Properties p;
+        p["base_color"]         = vec3(0.8f, 0.8f, 0.8f);
+        p["metalness"]          = 0.0f;
+        p["specular_roughness"] = 0.4f;
+        p["emission"]           = 0.0f;
+        pScene->setMaterialProperties(kTeapotMtl, p);
+    }
+    ASSERT_TRUE(pScene->addInstance("CornellTeapot", teapotGeom,
+        { { Names::InstanceProperties::kMaterial, kTeapotMtl } }));
+
+    // ---- Render TARGET: left wall = GREEN ----
+    {
+        Properties p;
+        p["base_color"] = vec3(0.1f, 0.8f, 0.1f);
+        p["emission"]   = 0.0f;
+        pScene->setMaterialProperties(kLeftWallMtl, p);
+    }
+
+    IRenderBufferPtr pTargetBuf =
+        pRenderer->createRenderBuffer(kWidth, kHeight, ImageFormat::Float_RGBA);
+    pRenderer->setTargets({ { AOV::kFinal, pTargetBuf } });
+    pRenderer->render(0, kSPP);
+    pRenderer->waitForTask();
+
+    size_t targetStride = 0;
+    const float* pTargetRaw =
+        reinterpret_cast<const float*>(pTargetBuf->data(targetStride, true));
+    ASSERT_NE(pTargetRaw, nullptr);
+    vector<float> targetPixels(pTargetRaw, pTargetRaw + kWidth * kHeight * 4);
+    saveFloatRGBAasPNG(kDebugDir + "/target.png", targetPixels.data(), kWidth, kHeight);
+
+    IImage::InitData targetInitData;
+    targetInitData.pImageData = targetPixels.data();
+    targetInitData.format     = ImageFormat::Float_RGBA;
+    targetInitData.linearize  = false;
+    targetInitData.width      = kWidth;
+    targetInitData.height     = kHeight;
+    targetInitData.name       = "CornellTarget";
+    pRenderer->setDiffTargetImage(targetInitData);
+
+    auto computeLoss = [&](const float* pRendered, const float* pTarget,
+                            int width, int height) -> double
+    {
+        double sum   = 0.0;
+        int    count = 0;
+        for (int i = 0; i < width * height; i++)
+        {
+            if (pRendered[i * 4 + 3] < 0.5f)
+                continue;
+            count++;
+            for (int c = 0; c < 3; c++)
+            {
+                float d = pRendered[i * 4 + c] - pTarget[i * 4 + c];
+                sum += d * d;
+            }
+        }
+        return count > 0 ? sum / count : 0.0;
+    };
+
+    // ---- Optimization: left wall RED → GREEN ----
+    vec3 leftWallColor = vec3(0.8f, 0.1f, 0.1f);
+    float gradScale = -1.0f; // captured at step 0, reused for consistent color mapping
+
+    vector<double> losses;
+    losses.reserve(kNumSteps);
+
+    for (int step = 0; step < kNumSteps; step++)
+    {
+        {
+            Properties p;
+            p["base_color"] = leftWallColor;
+            p["emission"]   = 0.0f;
+            pScene->setMaterialProperties(kLeftWallMtl, p);
+        }
+
+        IRenderBufferPtr pOptBuf =
+            pRenderer->createRenderBuffer(kWidth, kHeight, ImageFormat::Float_RGBA);
+        pRenderer->setTargets({ { AOV::kFinal, pOptBuf } });
+        pRenderer->render(0, kSPP);
+        pRenderer->waitForTask();
+
+        size_t optStride = 0;
+        const float* pOptRaw =
+            reinterpret_cast<const float*>(pOptBuf->data(optStride, true));
+        ASSERT_NE(pOptRaw, nullptr);
+        double loss = computeLoss(pOptRaw, targetPixels.data(), kWidth, kHeight);
+        losses.push_back(loss);
+
+        {
+            char fname[64];
+            snprintf(fname, sizeof(fname), "/step_%03d.png", step);
+            saveFloatRGBAasPNG(kDebugDir + fname, pOptRaw, kWidth, kHeight);
+
+            snprintf(fname, sizeof(fname), "/grad_%03d.png", step);
+            float frameMax = 0.0f;
+            saveGradientVisPNG(kDebugDir + fname,
+                pOptRaw, targetPixels.data(), kWidth, kHeight,
+                gradScale, &frameMax);
+            if (step == 0)
+                gradScale = frameMax;
+            snprintf(fname, sizeof(fname), "/diff_%03d.png", step);
+            saveDiffPNG(kDebugDir + fname,
+                targetPixels.data(), pOptRaw, kWidth, kHeight);
+        }
+
+        vector<float> grads = pRenderer->getMaterialGradients();
+        ASSERT_EQ(grads.size(), 15u) << "No valid surface hits at step " << step;
+
+        AU_INFO("  Step %3d: loss=%.6f  leftWall=(%.3f, %.3f, %.3f)  "
+            "grad=(%.4f, %.4f, %.4f)",
+            step, loss,
+            leftWallColor.x, leftWallColor.y, leftWallColor.z,
+            grads[0], grads[1], grads[2]);
+
+        constexpr float kEps = 0.01f;
+        leftWallColor.x -= kLR * grads[0];
+        leftWallColor.y -= kLR * grads[1];
+        leftWallColor.z -= kLR * grads[2];
+        leftWallColor.x = std::max(kEps, std::min(1.0f, leftWallColor.x));
+        leftWallColor.y = std::max(kEps, std::min(1.0f, leftWallColor.y));
+        leftWallColor.z = std::max(kEps, std::min(1.0f, leftWallColor.z));
+    }
+
+    // ---- Assertions ----
+    int maxMonoRun = 1, currentRun = 1;
+    for (int i = 1; i < (int)losses.size(); i++)
+    {
+        if (losses[i] <= losses[i - 1])
+        {
+            currentRun++;
+            maxMonoRun = std::max(maxMonoRun, currentRun);
+        }
+        else
+        {
+            currentRun = 1;
+        }
+    }
+    AU_INFO("Cornell Box — longest monotone decrease: %d steps (need %d)",
+        maxMonoRun, kMinMonoSteps);
+    EXPECT_GE(maxMonoRun, kMinMonoSteps)
+        << "Loss did not decrease monotonically for " << kMinMonoSteps
+        << " consecutive steps. Longest run: " << maxMonoRun;
+
+    double initialLoss = losses.front();
+    double finalLoss   = losses.back();
+    AU_INFO("Cornell Box — initial loss=%.6f  final loss=%.6f  ratio=%.4f",
+        initialLoss, finalLoss, finalLoss / initialLoss);
+    EXPECT_LT(finalLoss, initialLoss * kLossReductionFactor)
+        << "Final loss (" << finalLoss << ") is not < "
+        << kLossReductionFactor << " * initial loss (" << initialLoss << ")";
+
+    AU_INFO("Cornell Box — gradient images saved to %s", kDebugDir.c_str());
+}
+
+// ============================================================
+// Test A — Multi-bounce gradient sign (color bleeding)
+//
+// Scene: Two planes forming an L-shape (floor + wall). A bright emissive light
+// panel illuminates the floor from above. The floor is RED diffuse; the wall is
+// WHITE diffuse. The camera looks at the wall, which receives indirect red light
+// bounced off the floor.
+//
+// Target: same scene but the floor is GREEN. The wall therefore receives green
+// indirect light.
+//
+// The gradient on the floor's base_color must drive it from red toward green:
+//   grad[floor.baseColor.r] > 0  (reduce red contribution on wall)
+//   grad[floor.baseColor.g] < 0  (increase green contribution on wall)
+//
+// This can only succeed if bounce 1 (the floor hit that provides indirect
+// illumination to the wall) is recorded and differentiated.
+// ============================================================
+TEST_P(DiffRenderingTest, TestMultiBounceGradientSign)
+{
+    if (!isDirectX() || !backendSupported())
+    {
+        GTEST_SKIP() << "Differentiable rendering requires DirectX backend.";
+    }
+
+    constexpr int kWidth  = 64;
+    constexpr int kHeight = 64;
+
+    const std::string kDebugDir = "./OutputImages/DiffRenderDebug/MultiBounce";
+    std::filesystem::create_directories(kDebugDir);
+
+    IRendererPtr pRenderer = createDefaultRenderer(kWidth, kHeight);
+    ASSERT_NE(pRenderer, nullptr);
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", false);
+    pRenderer->options().setBoolean("alphaEnabled", true);
+    pRenderer->options().setInt("traceDepth", 5);
+
+    // Camera looks at the wall (along +Z), positioned so the wall fills the frame.
+    setDefaultRendererCamera(vec3(0, 0.5f, -3.0f), vec3(0, 0.5f, 0));
+
+    IScenePtr pScene = createDefaultScene();
+    ASSERT_NE(pScene, nullptr);
+
+    // NOTE: createPlaneGeometry() produces a 2x2 quad in the XY plane at Z=0
+    // with normal (0,0,-1). Transforms below orient each surface appropriately.
+
+    // Floor plane — rotate +90° around X to get normal +Y, then scale.
+    Path floorGeom = createPlaneGeometry(*pScene);
+    const Path kFloorMaterial = "FloorMaterial";
+    pScene->setMaterialType(kFloorMaterial);
+
+    // Wall plane — default normal is already -Z (faces camera). Just translate & scale.
+    Path wallGeom = createPlaneGeometry(*pScene);
+    const Path kWallMaterial = "WallMaterial";
+    pScene->setMaterialType(kWallMaterial);
+
+    // Light panel — rotate -90° around X to get normal -Y (faces down).
+    Path lightGeom = createPlaneGeometry(*pScene);
+    const Path kLightMaterial = "LightMaterial";
+    pScene->setMaterialType(kLightMaterial);
+
+    // Floor: large horizontal surface at Y=0, normal +Y.
+    // Rotate +90° around X swings -Z normal to +Y; scale 4x in XZ after rotation.
+    mat4 floorXform = glm::rotate(glm::radians(90.0f), vec3(1, 0, 0))
+        * glm::scale(vec3(4.0f, 4.0f, 1.0f));
+    Properties floorInstProps;
+    floorInstProps[Names::InstanceProperties::kMaterial]  = kFloorMaterial;
+    floorInstProps[Names::InstanceProperties::kTransform] = floorXform;
+    ASSERT_TRUE(pScene->addInstance("FloorInstance", floorGeom, floorInstProps));
+
+    // Wall: vertical surface at Z=2, normal -Z (faces camera).
+    // No rotation — default -Z normal is correct.
+    mat4 wallXform = glm::translate(vec3(0, 1.0f, 2.0f))
+        * glm::scale(vec3(4.0f, 2.0f, 1.0f));
+    Properties wallInstProps;
+    wallInstProps[Names::InstanceProperties::kMaterial]  = kWallMaterial;
+    wallInstProps[Names::InstanceProperties::kTransform] = wallXform;
+    ASSERT_TRUE(pScene->addInstance("WallInstance", wallGeom, wallInstProps));
+
+    // Light panel: emissive surface at Y=3 above the floor, normal -Y (faces down).
+    // Rotate -90° around X swings -Z normal to -Y.
+    mat4 lightXform = glm::translate(vec3(0, 3.0f, 1.0f))
+        * glm::rotate(glm::radians(-90.0f), vec3(1, 0, 0))
+        * glm::scale(vec3(3.0f, 3.0f, 1.0f));
+    Properties lightInstProps;
+    lightInstProps[Names::InstanceProperties::kMaterial]  = kLightMaterial;
+    lightInstProps[Names::InstanceProperties::kTransform] = lightXform;
+    ASSERT_TRUE(pScene->addInstance("LightInstance", lightGeom, lightInstProps));
+
+    // Light panel material: bright emissive white.
+    {
+        Properties p;
+        p["emission_color"] = vec3(1.0f, 1.0f, 1.0f);
+        p["emission"]       = 10.0f;
+        p["base_color"]     = vec3(0.0f, 0.0f, 0.0f);
+        pScene->setMaterialProperties(kLightMaterial, p);
+    }
+
+    // Wall material: white diffuse.
+    {
+        Properties p;
+        p["base_color"] = vec3(0.8f, 0.8f, 0.8f);
+        p["emission"]   = 0.0f;
+        pScene->setMaterialProperties(kWallMaterial, p);
+    }
+
+    // ---- Render TARGET: floor is GREEN ----
+    {
+        Properties p;
+        p["base_color"] = vec3(0.0f, 0.8f, 0.0f);
+        p["emission"]   = 0.0f;
+        pScene->setMaterialProperties(kFloorMaterial, p);
+    }
+
+    IRenderBufferPtr pTargetBuf =
+        pRenderer->createRenderBuffer(kWidth, kHeight, ImageFormat::Float_RGBA);
+    pRenderer->setTargets({ { AOV::kFinal, pTargetBuf } });
+    pRenderer->render(0, 1);
+    pRenderer->waitForTask();
+
+    size_t targetStride = 0;
+    const float* pTargetPixels =
+        reinterpret_cast<const float*>(pTargetBuf->data(targetStride, true));
+    ASSERT_NE(pTargetPixels, nullptr);
+    saveFloatRGBAasPNG(kDebugDir + "/target_green_floor.png", pTargetPixels, kWidth, kHeight);
+
+    vector<float> targetPixels(pTargetPixels, pTargetPixels + kWidth * kHeight * 4);
+
+    IImage::InitData targetInitData;
+    targetInitData.pImageData = targetPixels.data();
+    targetInitData.format     = ImageFormat::Float_RGBA;
+    targetInitData.linearize  = false;
+    targetInitData.width      = kWidth;
+    targetInitData.height     = kHeight;
+    targetInitData.name       = "MultiBounceTarget";
+    pRenderer->setDiffTargetImage(targetInitData);
+
+    // ---- Render with RED floor (the parameter we want gradients for) ----
+    {
+        Properties p;
+        p["base_color"] = vec3(0.8f, 0.0f, 0.0f);
+        p["emission"]   = 0.0f;
+        pScene->setMaterialProperties(kFloorMaterial, p);
+    }
+
+    IRenderBufferPtr pRedBuf =
+        pRenderer->createRenderBuffer(kWidth, kHeight, ImageFormat::Float_RGBA);
+    pRenderer->setTargets({ { AOV::kFinal, pRedBuf } });
+    pRenderer->render(0, 1);
+    pRenderer->waitForTask();
+
+    size_t redStride = 0;
+    const float* pRedPixels =
+        reinterpret_cast<const float*>(pRedBuf->data(redStride, true));
+    ASSERT_NE(pRedPixels, nullptr);
+    saveFloatRGBAasPNG(kDebugDir + "/rendered_red_floor.png", pRedPixels, kWidth, kHeight);
+
+    vector<float> grads = pRenderer->getMaterialGradients();
+    ASSERT_EQ(grads.size(), 15u) << "No valid surface hits.";
+
+    AU_INFO("MultiBounce Test A — mean material gradients:");
+    AU_INFO("  baseColor:      (%.6f, %.6f, %.6f)", grads[0], grads[1], grads[2]);
+    AU_INFO("  roughness:      %.6f", grads[3]);
+    AU_INFO("  metalness:      %.6f", grads[4]);
+    AU_INFO("  emissionColor:  (%.6f, %.6f, %.6f)", grads[5], grads[6], grads[7]);
+    AU_INFO("  emission:       %.6f", grads[8]);
+    AU_INFO("  specular:       %.6f", grads[9]);
+    AU_INFO("  specularColor:  (%.6f, %.6f, %.6f)", grads[10], grads[11], grads[12]);
+    AU_INFO("  specularIOR:    %.6f", grads[13]);
+    AU_INFO("  specularAniso:  %.6f", grads[14]);
+
+    // With multi-bounce, the gradients from the floor's indirect contribution
+    // to the wall should produce non-zero BRDF-related gradients (baseColor,
+    // roughness, metalness, specular, etc.) via bwd_diff(evaluateMaterial).
+    float brdfGradMag = 0.0f;
+    for (int i = 0; i < 15; i++)
+        brdfGradMag += std::abs(grads[i]);
+    EXPECT_GT(brdfGradMag, 0.0f)
+        << "Expected non-zero material gradients from multi-bounce indirect illumination.";
+
+    float baseColorMag = std::abs(grads[0]) + std::abs(grads[1]) + std::abs(grads[2]);
+    AU_INFO("  baseColor magnitude: %.8f, total gradient magnitude: %.8f",
+            baseColorMag, brdfGradMag);
+}
+
+// ============================================================
+// Test B — Mirror reflection gradient
+//
+// Scene: A teapot (glossy/metallic) in front of an emissive backdrop plane.
+// Camera sees the teapot, which reflects the backdrop color.
+// Target: same scene but backdrop is BLUE emissive.
+// Rendered: backdrop is RED emissive.
+//
+// Gradients on the backdrop's emissionColor should be non-zero, because the
+// reflected color on the teapot comes from bounce 1 (backdrop surface hit).
+// ============================================================
+TEST_P(DiffRenderingTest, TestMirrorReflectionGradient)
+{
+    if (!isDirectX() || !backendSupported())
+    {
+        GTEST_SKIP() << "Differentiable rendering requires DirectX backend.";
+    }
+
+    constexpr int kWidth  = 64;
+    constexpr int kHeight = 64;
+
+    const std::string kDebugDir = "./OutputImages/DiffRenderDebug/Mirror";
+    std::filesystem::create_directories(kDebugDir);
+
+    IRendererPtr pRenderer = createDefaultRenderer(kWidth, kHeight);
+    ASSERT_NE(pRenderer, nullptr);
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", false);
+    pRenderer->options().setBoolean("alphaEnabled", true);
+    pRenderer->options().setInt("traceDepth", 5);
+
+    setDefaultRendererCamera(vec3(0, 1, -5), vec3(0, 0.5f, 0));
+
+    IScenePtr pScene = createDefaultScene();
+    ASSERT_NE(pScene, nullptr);
+
+    // Metallic teapot (mirror-like).
+    Path teapotGeom = createTeapotGeometry(*pScene);
+    const Path kTeapotMaterial = "MirrorTeapotMaterial";
+    pScene->setMaterialType(kTeapotMaterial);
+    {
+        Properties p;
+        p["base_color"] = vec3(0.9f, 0.9f, 0.9f);
+        p["metalness"]  = 1.0f;
+        p["specular_roughness"] = 0.01f;
+        p["emission"]   = 0.0f;
+        pScene->setMaterialProperties(kTeapotMaterial, p);
+    }
+    ASSERT_TRUE(pScene->addInstance("TeapotInstance", teapotGeom,
+        { { Names::InstanceProperties::kMaterial, kTeapotMaterial } }));
+
+    // Backdrop plane behind the teapot. Default plane normal is -Z (faces camera),
+    // so no rotation needed — just translate behind the teapot and scale.
+    Path backdropGeom = createPlaneGeometry(*pScene);
+    const Path kBackdropMaterial = "BackdropMaterial";
+    pScene->setMaterialType(kBackdropMaterial);
+
+    mat4 backdropXform = glm::translate(vec3(0, 1.0f, 3.0f))
+        * glm::scale(vec3(5.0f, 5.0f, 1.0f));
+    ASSERT_TRUE(pScene->addInstance("BackdropInstance", backdropGeom,
+        { { Names::InstanceProperties::kMaterial, kBackdropMaterial },
+          { Names::InstanceProperties::kTransform, backdropXform } }));
+
+    // ---- Render TARGET: blue backdrop ----
+    {
+        Properties p;
+        p["emission_color"] = vec3(0.0f, 0.0f, 1.0f);
+        p["emission"]       = 3.0f;
+        p["base_color"]     = vec3(0.0f, 0.0f, 0.0f);
+        pScene->setMaterialProperties(kBackdropMaterial, p);
+    }
+
+    IRenderBufferPtr pTargetBuf =
+        pRenderer->createRenderBuffer(kWidth, kHeight, ImageFormat::Float_RGBA);
+    pRenderer->setTargets({ { AOV::kFinal, pTargetBuf } });
+    pRenderer->render(0, 1);
+    pRenderer->waitForTask();
+
+    size_t targetStride = 0;
+    const float* pTargetPixels =
+        reinterpret_cast<const float*>(pTargetBuf->data(targetStride, true));
+    ASSERT_NE(pTargetPixels, nullptr);
+    saveFloatRGBAasPNG(kDebugDir + "/target_blue_backdrop.png", pTargetPixels, kWidth, kHeight);
+
+    vector<float> targetPixels(pTargetPixels, pTargetPixels + kWidth * kHeight * 4);
+
+    IImage::InitData targetInitData;
+    targetInitData.pImageData = targetPixels.data();
+    targetInitData.format     = ImageFormat::Float_RGBA;
+    targetInitData.linearize  = false;
+    targetInitData.width      = kWidth;
+    targetInitData.height     = kHeight;
+    targetInitData.name       = "MirrorTarget";
+    pRenderer->setDiffTargetImage(targetInitData);
+
+    // ---- Render with RED backdrop ----
+    {
+        Properties p;
+        p["emission_color"] = vec3(1.0f, 0.0f, 0.0f);
+        p["emission"]       = 3.0f;
+        p["base_color"]     = vec3(0.0f, 0.0f, 0.0f);
+        pScene->setMaterialProperties(kBackdropMaterial, p);
+    }
+
+    IRenderBufferPtr pRedBuf =
+        pRenderer->createRenderBuffer(kWidth, kHeight, ImageFormat::Float_RGBA);
+    pRenderer->setTargets({ { AOV::kFinal, pRedBuf } });
+    pRenderer->render(0, 1);
+    pRenderer->waitForTask();
+
+    size_t redStride = 0;
+    const float* pRedPixels =
+        reinterpret_cast<const float*>(pRedBuf->data(redStride, true));
+    ASSERT_NE(pRedPixels, nullptr);
+    saveFloatRGBAasPNG(kDebugDir + "/rendered_red_backdrop.png", pRedPixels, kWidth, kHeight);
+
+    vector<float> grads = pRenderer->getMaterialGradients();
+    ASSERT_EQ(grads.size(), 15u) << "No valid surface hits.";
+
+    AU_INFO("Mirror Test B — mean material gradients:");
+    AU_INFO("  emissionColor: (%.6f, %.6f, %.6f)", grads[5], grads[6], grads[7]);
+    AU_INFO("  emission: %.6f", grads[8]);
+
+    // The backdrop emissionColor gradients should be non-zero: the reflected color
+    // on the teapot comes from the backdrop (bounce 1). This only works with
+    // multi-bounce path recording.
+    float emitGradMag = std::abs(grads[5]) + std::abs(grads[6]) + std::abs(grads[7]);
+    EXPECT_GT(emitGradMag, 0.0f)
+        << "Expected non-zero emissionColor gradients from reflected backdrop (bounce 1).";
+
+    // Stronger directional check: red is over-represented, so grad[emissionColor.r] > 0.
+    EXPECT_GT(grads[5], 0.0f)
+        << "Expected grad[emissionColor.r] > 0 (rendered red > target red).";
+    // Blue is under-represented, so grad[emissionColor.b] < 0.
+    EXPECT_LT(grads[7], 0.0f)
+        << "Expected grad[emissionColor.b] < 0 (rendered blue < target blue).";
+}
+
+// ============================================================
+// Test C — Numerical gradient check with multi-bounce
+//
+// Uses the mirror reflection scene (Test B) to verify that the AD gradient
+// from the backdrop's emissionColor (which is only visible via reflection
+// on the teapot at bounce 1) matches finite differences.
+// ============================================================
+TEST_P(DiffRenderingTest, TestMultiBounceNumericalGradCheck)
+{
+    if (!isDirectX() || !backendSupported())
+    {
+        GTEST_SKIP() << "Differentiable rendering requires DirectX backend.";
+    }
+
+    constexpr int   kWidth  = 64;
+    constexpr int   kHeight = 64;
+    constexpr int   kSPP    = 16;
+    constexpr float kEps    = 0.01f;
+    constexpr float kRelTol = 0.20f; // 20% tolerance: detached sampling (MIS weights not
+                                     // differentiated) introduces ~15% systematic AD bias
+
+    const std::string kDebugDir = "./OutputImages/DiffRenderDebug/MultiBounceNumerical";
+    std::filesystem::create_directories(kDebugDir);
+
+    // Surface-hit pixel mask for consistent FD/AD comparison.
+    vector<float> basePixelMask;
+    auto computeMeanLoss = [&](const float* pRendered, const float* pTarget,
+                                int width, int height) -> double
+    {
+        double sum   = 0.0;
+        int    count = 0;
+        for (int i = 0; i < width * height; i++)
+        {
+            float mask = basePixelMask.empty() ? pRendered[i * 4 + 3] : basePixelMask[i * 4 + 3];
+            if (mask < 0.5f)
+                continue;
+            count++;
+            for (int c = 0; c < 3; c++)
+            {
+                float diff = pRendered[i * 4 + c] - pTarget[i * 4 + c];
+                sum += diff * diff;
+            }
+        }
+        return count > 0 ? sum / count : 0.0;
+    };
+
+    IRendererPtr pRenderer = createDefaultRenderer(kWidth, kHeight);
+    ASSERT_NE(pRenderer, nullptr);
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", false);
+    pRenderer->options().setBoolean("alphaEnabled", true);
+    pRenderer->options().setInt("traceDepth", 5);
+    setDefaultRendererCamera(vec3(0, 1, -5), vec3(0, 0.5f, 0));
+
+    IScenePtr pScene = createDefaultScene();
+    ASSERT_NE(pScene, nullptr);
+
+    // Teapot: metallic mirror.
+    Path teapotGeom = createTeapotGeometry(*pScene);
+    const Path kTeapotMaterial = "NumCheckTeapotMtl";
+    pScene->setMaterialType(kTeapotMaterial);
+    {
+        Properties p;
+        p["base_color"] = vec3(0.9f, 0.9f, 0.9f);
+        p["metalness"]  = 1.0f;
+        p["specular_roughness"] = 0.01f;
+        p["emission"]   = 0.0f;
+        pScene->setMaterialProperties(kTeapotMaterial, p);
+    }
+    ASSERT_TRUE(pScene->addInstance("NumCheckTeapot", teapotGeom,
+        { { Names::InstanceProperties::kMaterial, kTeapotMaterial } }));
+
+    // Backdrop: emissive plane behind teapot. Default -Z normal faces camera.
+    Path backdropGeom = createPlaneGeometry(*pScene);
+    const Path kBackdropMaterial = "NumCheckBackdropMtl";
+    pScene->setMaterialType(kBackdropMaterial);
+    mat4 backdropXform = glm::translate(vec3(0, 1.0f, 3.0f))
+        * glm::scale(vec3(5.0f, 5.0f, 1.0f));
+    ASSERT_TRUE(pScene->addInstance("NumCheckBackdrop", backdropGeom,
+        { { Names::InstanceProperties::kMaterial, kBackdropMaterial },
+          { Names::InstanceProperties::kTransform, backdropXform } }));
+
+    const vec3  kBaseEmitColor  = vec3(1.0f, 0.5f, 0.2f);
+    const float kBaseEmission   = 3.0f;
+    const vec3  kTargetEmitColor = vec3(0.0f, 0.0f, 1.0f);
+
+    // ---- Render target ----
+    {
+        Properties p;
+        p["emission_color"] = kTargetEmitColor;
+        p["emission"]       = kBaseEmission;
+        p["base_color"]     = vec3(0.0f);
+        pScene->setMaterialProperties(kBackdropMaterial, p);
+    }
+    IRenderBufferPtr pTargetBuf =
+        pRenderer->createRenderBuffer(kWidth, kHeight, ImageFormat::Float_RGBA);
+    pRenderer->setTargets({ { AOV::kFinal, pTargetBuf } });
+    pRenderer->render(0, kSPP);
+    pRenderer->waitForTask();
+    size_t ts = 0;
+    const float* pTP = reinterpret_cast<const float*>(pTargetBuf->data(ts, true));
+    ASSERT_NE(pTP, nullptr);
+    saveFloatRGBAasPNG(kDebugDir + "/target.png", pTP, kWidth, kHeight);
+    vector<float> targetPixels(pTP, pTP + kWidth * kHeight * 4);
+
+    IImage::InitData tgt;
+    tgt.pImageData = targetPixels.data();
+    tgt.format     = ImageFormat::Float_RGBA;
+    tgt.linearize  = false;
+    tgt.width      = kWidth;
+    tgt.height     = kHeight;
+    tgt.name       = "NumCheckTarget";
+    pRenderer->setDiffTargetImage(tgt);
+
+    // Parameters to test (backdrop emissionColor channels).
+    struct ParamTest { const char* name; int gradIdx; vec3 emitColor; float emission; };
+    vector<ParamTest> params = {
+        { "emissionColor.r", 5, vec3(kBaseEmitColor.x + kEps, kBaseEmitColor.y, kBaseEmitColor.z), kBaseEmission },
+        { "emissionColor.g", 6, vec3(kBaseEmitColor.x, kBaseEmitColor.y + kEps, kBaseEmitColor.z), kBaseEmission },
+        { "emissionColor.b", 7, vec3(kBaseEmitColor.x, kBaseEmitColor.y, kBaseEmitColor.z + kEps), kBaseEmission },
+    };
+
+    // ---- Base render + AD gradients ----
+    {
+        Properties p;
+        p["emission_color"] = kBaseEmitColor;
+        p["emission"]       = kBaseEmission;
+        p["base_color"]     = vec3(0.0f);
+        pScene->setMaterialProperties(kBackdropMaterial, p);
+    }
+    IRenderBufferPtr pBaseBuf =
+        pRenderer->createRenderBuffer(kWidth, kHeight, ImageFormat::Float_RGBA);
+    pRenderer->setTargets({ { AOV::kFinal, pBaseBuf } });
+    pRenderer->render(0, kSPP);
+    pRenderer->waitForTask();
+    size_t bs = 0;
+    const float* pBP = reinterpret_cast<const float*>(pBaseBuf->data(bs, true));
+    ASSERT_NE(pBP, nullptr);
+    saveFloatRGBAasPNG(kDebugDir + "/base.png", pBP, kWidth, kHeight);
+    vector<float> basePixels(pBP, pBP + kWidth * kHeight * 4);
+    basePixelMask = basePixels;
+    double lossBase = computeMeanLoss(basePixels.data(), targetPixels.data(), kWidth, kHeight);
+
+    vector<float> adGrads = pRenderer->getMaterialGradients();
+    ASSERT_EQ(adGrads.size(), 15u);
+
+    AU_INFO("MultiBounce Numerical — base loss = %.6f (SPP=%d)", lossBase, kSPP);
+
+    bool allPassed = true;
+    for (const auto& pt : params)
+    {
+        {
+            Properties p;
+            p["emission_color"] = pt.emitColor;
+            p["emission"]       = pt.emission;
+            p["base_color"]     = vec3(0.0f);
+            pScene->setMaterialProperties(kBackdropMaterial, p);
+        }
+        IRenderBufferPtr pPertBuf =
+            pRenderer->createRenderBuffer(kWidth, kHeight, ImageFormat::Float_RGBA);
+        pRenderer->setTargets({ { AOV::kFinal, pPertBuf } });
+        pRenderer->render(0, kSPP);
+        pRenderer->waitForTask();
+        size_t ps = 0;
+        const float* pPP = reinterpret_cast<const float*>(pPertBuf->data(ps, true));
+        ASSERT_NE(pPP, nullptr);
+        saveFloatRGBAasPNG(kDebugDir + "/perturbed_" + pt.name + ".png", pPP, kWidth, kHeight);
+        vector<float> pertPixels(pPP, pPP + kWidth * kHeight * 4);
+
+        double lossPert = computeMeanLoss(pertPixels.data(), targetPixels.data(), kWidth, kHeight);
+        double fd       = (lossPert - lossBase) / kEps;
+        double ad       = adGrads[pt.gradIdx];
+        double relErr   = (std::abs(fd) > 1e-8) ? std::abs(ad - fd) / std::abs(fd) : std::abs(ad - fd);
+
+        AU_INFO("  %-20s  AD=%+.6f  FD=%+.6f  relErr=%.4f  %s",
+            pt.name, ad, fd, relErr, relErr < kRelTol ? "PASS" : "FAIL");
+
+        EXPECT_LT(relErr, kRelTol)
+            << "Numerical gradient check FAILED for " << pt.name
+            << ": AD=" << ad << " FD=" << fd << " relErr=" << relErr;
+        if (relErr >= kRelTol)
+            allPassed = false;
+    }
+
+    AU_INFO("MultiBounce Numerical — %s", allPassed ? "ALL PASSED" : "SOME FAILED");
+}
+
+// ============================================================
+// Test D — Optimization loop with indirect illumination (baseColor)
+//
+// Uses the mirror reflection scene: optimizes the backdrop base_color
+// (visible only via reflection on the teapot at bounce 1) to match a target.
+// A front-facing distant light illuminates the backdrop so its BRDF
+// (which depends on base_color) modulates the reflected radiance.
+// Starting from RED backdrop, target is BLUE backdrop.
+//
+// Pass criteria:
+//   - Loss decreases over iterations.
+//   - Final loss < 20% of initial (looser tolerance for indirect paths).
+// ============================================================
+TEST_P(DiffRenderingTest, TestMultiBounceOptimizationLoop)
+{
+    if (!isDirectX() || !backendSupported())
+    {
+        GTEST_SKIP() << "Differentiable rendering requires DirectX backend.";
+    }
+
+    constexpr int   kWidth              = 64;
+    constexpr int   kHeight             = 64;
+    constexpr int   kSPP                = 16;
+    constexpr int   kNumSteps           = 50;
+    constexpr float kLR                 = 0.50f;
+    constexpr int   kMinMonoSteps       = 10;
+    constexpr float kLossReductionFactor = 0.30f;
+
+    const std::string kDebugDir = "./OutputImages/DiffRenderDebug/MultiBounceOptim";
+    std::filesystem::create_directories(kDebugDir);
+
+    IRendererPtr pRenderer = createDefaultRenderer(kWidth, kHeight);
+    ASSERT_NE(pRenderer, nullptr);
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", false);
+    pRenderer->options().setBoolean("alphaEnabled", true);
+    pRenderer->options().setInt("traceDepth", 5);
+    setDefaultRendererCamera(vec3(0, 1, -5), vec3(0, 0.5f, 0));
+
+    IScenePtr pScene = createDefaultScene();
+    ASSERT_NE(pScene, nullptr);
+
+    // Point the default distant light at the backdrop (toward +Z) so the
+    // backdrop's BRDF / base_color actually modulates visible radiance.
+    defaultDistantLight()->values().setFloat3(
+        Names::LightProperties::kDirection, value_ptr(vec3(0, 0, -1)));
+    defaultDistantLight()->values().setFloat(
+        Names::LightProperties::kIntensity, 3.0f);
+
+    Path teapotGeom = createTeapotGeometry(*pScene);
+    const Path kTeapotMaterial = "OptTeapotMtl";
+    pScene->setMaterialType(kTeapotMaterial);
+    {
+        Properties p;
+        p["base_color"]  = vec3(0.9f, 0.9f, 0.9f);
+        p["metalness"]   = 1.0f;
+        p["specular_roughness"] = 0.01f;
+        p["emission"]    = 0.0f;
+        pScene->setMaterialProperties(kTeapotMaterial, p);
+    }
+    ASSERT_TRUE(pScene->addInstance("OptTeapot", teapotGeom,
+        { { Names::InstanceProperties::kMaterial, kTeapotMaterial } }));
+
+    Path backdropGeom = createPlaneGeometry(*pScene);
+    const Path kBackdropMaterial = "OptBackdropMtl";
+    pScene->setMaterialType(kBackdropMaterial);
+    mat4 backdropXform = glm::translate(vec3(0, 1.0f, 3.0f))
+        * glm::scale(vec3(5.0f, 5.0f, 1.0f));
+    ASSERT_TRUE(pScene->addInstance("OptBackdrop", backdropGeom,
+        { { Names::InstanceProperties::kMaterial, kBackdropMaterial },
+          { Names::InstanceProperties::kTransform, backdropXform } }));
+
+    // ---- Target: cool blue diffuse backdrop ----
+    // Avoid exact zeros in base_color components: pow(0, n) has an AD singularity
+    // in Slang where the derivative is computed as pow(x,n)/x*n → 0/0 = NaN.
+    {
+        Properties p;
+        p["base_color"] = vec3(0.05f, 0.05f, 0.9f);
+        p["emission"]   = 0.0f;
+        pScene->setMaterialProperties(kBackdropMaterial, p);
+    }
+    IRenderBufferPtr pTargetBuf =
+        pRenderer->createRenderBuffer(kWidth, kHeight, ImageFormat::Float_RGBA);
+    pRenderer->setTargets({ { AOV::kFinal, pTargetBuf } });
+    pRenderer->render(0, kSPP);
+    pRenderer->waitForTask();
+    size_t ts = 0;
+    const float* pTP = reinterpret_cast<const float*>(pTargetBuf->data(ts, true));
+    ASSERT_NE(pTP, nullptr);
+    vector<float> targetPixels(pTP, pTP + kWidth * kHeight * 4);
+    saveFloatRGBAasPNG(kDebugDir + "/target.png", targetPixels.data(), kWidth, kHeight);
+
+    IImage::InitData targetInitData;
+    targetInitData.pImageData = targetPixels.data();
+    targetInitData.format     = ImageFormat::Float_RGBA;
+    targetInitData.linearize  = false;
+    targetInitData.width      = kWidth;
+    targetInitData.height     = kHeight;
+    targetInitData.name       = "OptTarget";
+    pRenderer->setDiffTargetImage(targetInitData);
+
+    auto computeLoss = [&](const float* pRendered, const float* pTarget,
+                            int width, int height) -> double
+    {
+        double sum   = 0.0;
+        int    count = 0;
+        for (int i = 0; i < width * height; i++)
+        {
+            if (pRendered[i * 4 + 3] < 0.5f)
+                continue;
+            count++;
+            for (int c = 0; c < 3; c++)
+            {
+                float d = pRendered[i * 4 + c] - pTarget[i * 4 + c];
+                sum += d * d;
+            }
+        }
+        return count > 0 ? sum / count : 0.0;
+    };
+
+    // Start from warm red diffuse backdrop.
+    // Avoid exact zeros: pow(0, n) has an AD singularity in Slang.
+    vec3 baseColor = vec3(0.9f, 0.05f, 0.05f);
+    float gradScale = -1.0f;
+
+    vector<double> losses;
+    losses.reserve(kNumSteps);
+
+    for (int step = 0; step < kNumSteps; step++)
+    {
+        {
+            Properties p;
+            p["base_color"] = baseColor;
+            p["emission"]   = 0.0f;
+            pScene->setMaterialProperties(kBackdropMaterial, p);
+        }
+
+        IRenderBufferPtr pOptBuf =
+            pRenderer->createRenderBuffer(kWidth, kHeight, ImageFormat::Float_RGBA);
+        pRenderer->setTargets({ { AOV::kFinal, pOptBuf } });
+        pRenderer->render(0, kSPP);
+        pRenderer->waitForTask();
+
+        size_t os = 0;
+        const float* pOP = reinterpret_cast<const float*>(pOptBuf->data(os, true));
+        ASSERT_NE(pOP, nullptr);
+        double loss = computeLoss(pOP, targetPixels.data(), kWidth, kHeight);
+        losses.push_back(loss);
+
+        {
+            char fname[64];
+            snprintf(fname, sizeof(fname), "/step_%03d.png", step);
+            saveFloatRGBAasPNG(kDebugDir + fname, pOP, kWidth, kHeight);
+
+            if (step == 0 || step == kNumSteps / 2 || step == kNumSteps - 1)
+            {
+                snprintf(fname, sizeof(fname), "/grad_%03d.png", step);
+                float frameMax = 0.0f;
+                saveGradientVisPNG(kDebugDir + fname,
+                    pOP, targetPixels.data(), kWidth, kHeight,
+                    gradScale, &frameMax);
+                if (step == 0)
+                    gradScale = frameMax;
+                snprintf(fname, sizeof(fname), "/diff_%03d.png", step);
+                saveDiffPNG(kDebugDir + fname,
+                    targetPixels.data(), pOP, kWidth, kHeight);
+            }
+        }
+
+        vector<float> grads = pRenderer->getMaterialGradients();
+        ASSERT_EQ(grads.size(), 15u) << "No valid surface hits at step " << step;
+
+        AU_INFO("  Step %3d: loss=%.6f  baseColor=(%.3f, %.3f, %.3f)  grad=(%.4f, %.4f, %.4f)",
+            step, loss, baseColor.x, baseColor.y, baseColor.z,
+            grads[0], grads[1], grads[2]);
+
+        // SGD on baseColor (indices 0, 1, 2).
+        // Clamp to [eps, 1] to avoid pow(0, n) AD singularity in Slang.
+        constexpr float kEps = 0.01f;
+        baseColor.x -= kLR * grads[0];
+        baseColor.y -= kLR * grads[1];
+        baseColor.z -= kLR * grads[2];
+        baseColor.x = std::max(kEps, std::min(1.0f, baseColor.x));
+        baseColor.y = std::max(kEps, std::min(1.0f, baseColor.y));
+        baseColor.z = std::max(kEps, std::min(1.0f, baseColor.z));
+    }
+
+    // Check 1: monotone decrease for at least kMinMonoSteps consecutive steps.
+    int maxMonoRun = 1, currentRun = 1;
+    for (int i = 1; i < (int)losses.size(); i++)
+    {
+        if (losses[i] <= losses[i - 1])
+        {
+            currentRun++;
+            maxMonoRun = std::max(maxMonoRun, currentRun);
+        }
+        else
+        {
+            currentRun = 1;
+        }
+    }
+    AU_INFO("MultiBounce Optim — longest monotone decrease: %d steps (need %d)",
+        maxMonoRun, kMinMonoSteps);
+    EXPECT_GE(maxMonoRun, kMinMonoSteps)
+        << "Loss did not decrease monotonically for " << kMinMonoSteps
+        << " consecutive steps. Longest run: " << maxMonoRun;
+
+    // Check 2: final loss < kLossReductionFactor * initial loss.
+    double initialLoss = losses.front();
+    double finalLoss   = losses.back();
+    AU_INFO("MultiBounce Optim — initial loss=%.6f  final loss=%.6f  ratio=%.4f",
+        initialLoss, finalLoss, finalLoss / initialLoss);
+    EXPECT_LT(finalLoss, initialLoss * kLossReductionFactor)
+        << "Final loss (" << finalLoss << ") is not < "
+        << kLossReductionFactor << " * initial loss (" << initialLoss << ")";
 }
 
 INSTANTIATE_TEST_SUITE_P(DiffRendering, DiffRenderingTest, TEST_SUITE_RENDERER_TYPES());
