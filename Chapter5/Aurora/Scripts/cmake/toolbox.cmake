@@ -41,19 +41,34 @@ macro(minify_shaders header shader_folder shaders)
         set_property(SOURCE ${shader} PROPERTY VS_TOOL_OVERRIDE "NONE")
     endforeach()
 
+    # Build optional extra defines string to pass to slangc (e.g. ENABLE_DIFFERENTIABLE_RENDERING).
+    set(_extra_defines "")
+    if(ENABLE_DIFFERENTIABLE_RENDERING)
+        set(_extra_defines "ENABLE_DIFFERENTIABLE_RENDERING=1")
+    endif()
+
+    # Collect all output headers. When ENABLE_DIFFERENTIABLE_RENDERING is ON the
+    # Python script also emits DiffComputeShaders.h; declare it so CMake re-runs
+    # the command when the file is missing.
+    set(_outputs ${header})
+    if(ENABLE_DIFFERENTIABLE_RENDERING)
+        get_filename_component(_header_dir ${header} DIRECTORY)
+        list(APPEND _outputs "${_header_dir}/DiffComputeShaders.h")
+    endif()
+
     # Add a custom command to create minified shader.
     if(APPLE OR UNIX)
         # XXX: Disable slangc on MacOS & Linux for now.
         add_custom_command(
-            OUTPUT ${header}
+            OUTPUT ${_outputs}
             COMMAND ${Python3_EXECUTABLE} ${SCRIPTS_DIR}/minifyShadersFolder.py ${shader_folder} ${header}
             COMMENT "Minifying path tracing shaders to ${header}"
             DEPENDS ${shaders}
         )
     else()
         add_custom_command(
-            OUTPUT ${header}
-            COMMAND  ${CMAKE_COMMAND} -E env "DXC_LIBRARY_DIR=${DXC_LIBRARY_DIR}" ${Python3_EXECUTABLE} ${SCRIPTS_DIR}/minifyShadersFolder.py ${shader_folder} ${header} ${Slang_COMPILER}
+            OUTPUT ${_outputs}
+            COMMAND  ${CMAKE_COMMAND} -E env "DXC_LIBRARY_DIR=${DXC_LIBRARY_DIR}" ${Python3_EXECUTABLE} ${SCRIPTS_DIR}/minifyShadersFolder.py ${shader_folder} ${header} ${Slang_COMPILER} MainEntryPoints dxil "${_extra_defines}"
             COMMENT "Minifying path tracing shaders to ${header}"
             DEPENDS ${shaders}
         )

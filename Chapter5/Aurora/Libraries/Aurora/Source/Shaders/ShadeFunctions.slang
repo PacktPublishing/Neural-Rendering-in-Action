@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include "BSDF.slang"
+#include "RayTrace.slang"
 
 // Compute shading from material emission.
+// [Differentiable]: gradients flow through emission, emissionColor, coat, coatColor.
+[Differentiable]
 float3 shadeEmission(Material material)
 {
     // Compute emission from the material properties. The emission is affected by the coat, i.e. the

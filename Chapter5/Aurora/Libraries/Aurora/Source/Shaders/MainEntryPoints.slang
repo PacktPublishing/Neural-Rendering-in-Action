@@ -39,6 +39,53 @@ RWTexture2D<float4> gBaseColorMetalness : register(u4);
 RWTexture2D<float4> gDiffuse : register(u5);
 RWTexture2D<float4> gGlossy : register(u6);
 
+
+#ifdef ENABLE_DIFFERENTIABLE_RENDERING
+// ============================================================
+// Path recording structs for differentiable rendering
+// ============================================================
+// MAX_PATH_BOUNCES kept for compatibility but only 1 bounce is recorded.
+#define MAX_PATH_BOUNCES 1
+
+// Path records written by RayGenShader (forward), read by GradientAccumShader (backward).
+// Stored as a flat float4 buffer in the ray gen shader.
+// Layout per pixel (11 float4s = 176 bytes, stride = DIFF_RECORD_STRIDE):
+//   [0]  baseColor.xyz, roughness
+//   [1]  emissionColor.xyz, emission
+//   [2]  specularColor.xyz, specular
+//   [3]  specularIOR, specularAnisotropy, metalness, isValid (1=valid)
+//   [4]  normal.xyz, 0
+//   [5]  tangent.xyz, 0
+//   [6]  bitangent.xyz, 0
+//   [7]  viewDir.xyz, 0
+//   [8]  lightDir.xyz, 0
+//   [9]  lightRadiance.xyz, 0
+//   [10] throughput.xyz, 0
+#define DIFF_RECORD_STRIDE 11
+RWByteAddressBuffer gPathRecords   : register(u10);
+// Accumulated dL/d_material: 15 floats per material
+// [0-2] baseColor, [3] roughness, [4] metalness,
+// [5-7] emissionColor, [8] emission, [9] specular,
+// [10-12] specularColor, [13] specularIOR, [14] specularAnisotropy
+// Per-pixel layout: pixelIndex * MATERIAL_GRAD_STRIDE * 4 bytes + field_offset * 4.
+// CPU reduces across pixels after readback.
+RWByteAddressBuffer         gMaterialGrads : register(u11);
+// Reference/target image for loss gradient.
+// Uses space2 to avoid conflict with gGlobalMaterialTextures[] unbounded array (space0)
+// and geometry buffers gIndices/gPositions/etc. (space1).
+Texture2D<float4>                   gTargetImage   : register(t0, space2);
+
+cbuffer gDiffRenderConstants : register(b4)
+{
+    uint  gScreenWidth;
+    uint  gScreenHeight;
+    uint  gNumMaterials;
+    float _diffPad;
+}
+
+#define MATERIAL_GRAD_STRIDE 15
+#endif // ENABLE_DIFFERENTIABLE_RENDERING
+
 // Results of the path tracing sample.
 struct Output
 {
@@ -91,6 +138,13 @@ void RayGenShader()
     uint2 screenSize = DispatchRaysDimensions().xy;
     uint2 screenCoords = DispatchRaysIndex().xy;
     uint sampleIndex = gSampleData.sampleIndex;
+
+#ifdef ENABLE_DIFFERENTIABLE_RENDERING
+    // NEW: Initialize path record for this pixel (differentiable rendering forward pass)
+    uint pixelIndex = screenCoords.y * screenSize.x + screenCoords.x;
+    // Mark slot [3].w = 0 (isValid=0) until a bounce is recorded.
+    gPathRecords.Store(pixelIndex * DIFF_RECORD_STRIDE * 16 + 3*16 + 12, asuint(0.0f));
+#endif // ENABLE_DIFFERENTIABLE_RENDERING
 
     // Initialize a random number generator, so that each sample and pixel gets a unique seed.
     Random rng = initRand(sampleIndex, screenSize, screenCoords);
@@ -413,6 +467,32 @@ void RayGenShader()
                                 }
 
                             }
+
+#ifdef ENABLE_DIFFERENTIABLE_RENDERING
+                            // Record this bounce for the backward pass.
+                            // We store material params + geometry so GradientAccumShader
+                            // (a compute shader) can re-evaluate shading differentiably.
+                            // TraceRay() is a DXR intrinsic unavailable in compute shaders,
+                            // so the forward pass must record everything the backward pass needs.
+                            {
+                                uint byteBase = pixelIndex * DIFF_RECORD_STRIDE * 16; // 16 bytes per float4
+                                float3 lightD = misEmitsMaterialShadowRay
+                                    ? misMaterialShadowRayDirection : float3(0.0f, 1.0f, 0.0f);
+                                float3 lightR = misEmitsMaterialShadowRay
+                                    ? misMaterialResult : float3(0.0f, 0.0f, 0.0f);
+                                gPathRecords.Store4(byteBase +  0*16, asuint(float4(material.baseColor, material.specularRoughness)));
+                                gPathRecords.Store4(byteBase +  1*16, asuint(float4(material.emissionColor, material.emission)));
+                                gPathRecords.Store4(byteBase +  2*16, asuint(float4(material.specularColor, material.specular)));
+                                gPathRecords.Store4(byteBase +  3*16, asuint(float4(material.specularIOR, material.specularAnisotropy, material.metalness, 1.0f)));
+                                gPathRecords.Store4(byteBase +  4*16, asuint(float4(shading.normal, 0.0f)));
+                                gPathRecords.Store4(byteBase +  5*16, asuint(float4(shading.tangent, 0.0f)));
+                                gPathRecords.Store4(byteBase +  6*16, asuint(float4(shading.bitangent, 0.0f)));
+                                gPathRecords.Store4(byteBase +  7*16, asuint(float4(V, 0.0f)));
+                                gPathRecords.Store4(byteBase +  8*16, asuint(float4(lightD, 0.0f)));
+                                gPathRecords.Store4(byteBase +  9*16, asuint(float4(lightR, 0.0f)));
+                                gPathRecords.Store4(byteBase + 10*16, asuint(float4(rayContribution, 0.0f)));
+                            }
+#endif // ENABLE_DIFFERENTIABLE_RENDERING
 
                             // If next ray not needed (as contribution is too small) terminate the path.
                             if (nextRayType == NO_SECONDARY_RAY)
