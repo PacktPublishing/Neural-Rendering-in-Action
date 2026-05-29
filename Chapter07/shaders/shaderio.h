@@ -169,6 +169,15 @@ enum PathtracerFlags
   ePtUseDlss          = 1 << 0,
   ePtUseOptixDenoiser = 1 << 1,
   ePtFirstFrame       = 1 << 2,
+  ePtNrcEnabled       = 1 << 3,
+  ePtAccumulate       = 1 << 4,
+};
+
+enum NrcViewMode
+{
+  eNrcViewNone       = 0,
+  eNrcViewNrc        = 1,
+  eNrcViewCacheDebug = 2,
 };
 
 
@@ -183,9 +192,19 @@ struct PathtracePushConstant
   int                    totalSamples          = 0;     // Total samples accumulated so far
   float                  focalDistance         = 0.0f;  // Focal distance for depth of field
   float                  aperture              = 0.0f;  // Aperture for depth of field
-  int                    flags                 = 0;     // Bit flags: ePtUseDlss | ePtUseOptixDenoiser | ePtFirstFrame
+  int                    flags                 = 0;     // Bit flags: PathtracerFlags
+  uint                   nrcTrainingRayThreshold = 0u;
+  uint                   nrcTrainingCapacity     = 0u;
+  uint                   nrcQueryCapacity        = 0u;
+  uint                   nrcLeftViewMode         = 0u;  // NrcViewMode::eNrcViewNone
+  uint                   nrcRightViewMode        = 1u;  // NrcViewMode::eNrcViewNrc
   float2                 jitter;                        // Jitter for the DLSS
   float2                 mouseCoord = {0, 0};           // Mouse coordinates (use for debug)
+  uint2                  renderingSize = {0, 0};        // Actual tracing extent, including upscaling
+  // NRC feature normalization: the frequency encoder expects positions in
+  // [0,1]^3, so the shader maps world positions through the scene AABB.
+  float3                 nrcSceneMin       = {0, 0, 0};
+  float3                 nrcSceneInvExtent = {1, 1, 1};
   SceneFrameInfo*        frameInfo;                     // Camera info
   SkyPhysicalParameters* skyParams;                     // Sky physical parameters
   GltfScene*             gltfScene;                     // GLTF scene
