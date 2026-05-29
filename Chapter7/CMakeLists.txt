@@ -20,6 +20,39 @@ if(NOT DEFINED GLTF_SAMPLE_ASSETS_PATH)
   set(GLTF_SAMPLE_ASSETS_PATH "$ENV{GLTF_SAMPLE_ASSETS_PATH}" CACHE PATH "Path to glTF-Sample-Assets (optional)")
 endif()
 
+option(VKGLTF_ENABLE_NRC "Enable Neural Radiance Cache integration" ON)
+if(VKGLTF_ENABLE_NRC)
+  set(VKGLTF_NRC_SLANG_VERSION "2026.5" CACHE STRING "Slang SDK version used by the RTXNS-backed NRC shaders")
+  set(Slang_VERSION "${VKGLTF_NRC_SLANG_VERSION}" CACHE STRING "Slang version required by NRC/RTXNS integration" FORCE)
+
+  if(NOT DEFINED RTXNS_ROOT)
+    set(_RTXNS_CANDIDATES
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/RTXNS"
+      "${CMAKE_CURRENT_SOURCE_DIR}/RTXNS"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../RTXNS"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../NeuralRadianceCache/RTXNS"
+    )
+    foreach(_RTXNS_CANDIDATE IN LISTS _RTXNS_CANDIDATES)
+      if(EXISTS "${_RTXNS_CANDIDATE}/src/NeuralShading_Shaders/MLP.slang")
+        set(RTXNS_ROOT "${_RTXNS_CANDIDATE}" CACHE PATH "Path to RTXNS checkout")
+        break()
+      endif()
+    endforeach()
+    if(NOT DEFINED RTXNS_ROOT)
+      set(RTXNS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/RTXNS" CACHE PATH "Path to RTXNS checkout")
+    endif()
+  endif()
+
+  if(NOT EXISTS "${RTXNS_ROOT}/src/NeuralShading_Shaders/MLP.slang")
+    message(FATAL_ERROR
+      "RTXNS not found at ${RTXNS_ROOT}.\n"
+      "Clone https://github.com/NVIDIA-RTX/RTXNS at tag v1.3.1, or configure with "
+      "-DRTXNS_ROOT=<path-to-RTXNS>.")
+  endif()
+
+  find_package(Vulkan REQUIRED)
+endif()
+
 # Disable unused libraries from nvpro_core2 - we use local copy
 option(NVPRO2_ENABLE_nvvkgltf "Disable nvvkgltf from nvpro_core2" OFF)
 option(NVPRO2_ENABLE_nvvkglsl "Disable nvvkglsl from nvpro_core2" OFF)
@@ -112,6 +145,10 @@ list(FILTER EXE_SOURCES EXCLUDE REGEX "dlss*")
 list(FILTER EXE_SOURCES EXCLUDE REGEX "vk_cuda*")
 list(FILTER EXE_SOURCES EXCLUDE REGEX "optix_denoiser*")
 
+if(VKGLTF_ENABLE_NRC)
+  add_subdirectory(src/nrc)
+endif()
+
 # source_group("Source Files" FILES ${EXE_SOURCES})
 
 # Add the executable
@@ -136,6 +173,14 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   tinyobjloader
   meshoptimizer
 )
+
+if(VKGLTF_ENABLE_NRC)
+  target_link_libraries(${PROJECT_NAME} PRIVATE nrc)
+  target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE VKGLTF_ENABLE_NRC=1)
+else()
+  target_compile_definitions(${PROJECT_NAME} PRIVATE VKGLTF_ENABLE_NRC=0)
+endif()
 
 add_project_definitions(${PROJECT_NAME})
 
@@ -171,6 +216,15 @@ set(SHADER_SHARED_SLANG_FILES
 
 # Combine all shader files for compilation
 set(SHADER_SLANG_FILES ${SHADER_SRC_SLANG_FILES} ${SHADER_SHARED_SLANG_FILES})
+if(VKGLTF_ENABLE_NRC)
+  list(APPEND SHADER_SLANG_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/nrc/shaders/nrc_cache_query.comp.slang"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/nrc/shaders/nrc_record_complete.comp.slang"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/nrc/shaders/nrc_train.comp.slang"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/nrc/shaders/nrc_optimizer.comp.slang"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/nrc/shaders/nrc_compose.comp.slang"
+  )
+endif()
 list(LENGTH SHADER_SLANG_FILES _SHADER_COUNT)
 message(STATUS "Compiling ${_SHADER_COUNT} Slang shader(s) to SPIR-V")
 
@@ -180,9 +234,26 @@ set(SHADER_OPT_LEVEL 0)     # None:0 — let the driver optimize
 
 # Define required SPIR-V capabilities for ray tracing and advanced features
 set(SHADER_CAPABILITIES 
+  spvInt64Atomics                   # 64-bit atomics used by ray tracing/NRC helpers
+  spvShaderClockKHR                 # Shader clock for profiling
+  spvRayTracingMotionBlurNV         # Motion blur for ray tracing
+  spvRayQueryKHR                    # Ray query operations
+  spvGroupNonUniformBallot          # Ballot operations for subgroup functionality
   spvGroupNonUniformArithmetic      # Arithmetic operations across subgroups
-  spvGroupNonUniform                # Enable subgroup operations (required for wave operations in shaders
+  spvImageGatherExtended            # Slang emits this as a transitive dependency of GLSL450 extended instructions
 )
+if(VKGLTF_ENABLE_NRC)
+  list(APPEND SHADER_CAPABILITIES
+    spvCooperativeVectorNV          # NRC: CoopVec matmul/inference
+    spvCooperativeVectorTrainingNV  # NRC: CoopVec training operations
+  )
+endif()
+
+set(SHADER_EXTRA_FLAGS "-I${NVSHADERS_DIR}")
+if(VKGLTF_ENABLE_NRC)
+  set(NRC_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/nrc/shaders")
+  list(APPEND SHADER_EXTRA_FLAGS "-I${NRC_SHADER_DIR}" "-I${RTXNS_ROOT}/src/NeuralShading_Shaders")
+endif()
 
 # Compile all shaders to embedded headers (.h) and SPIR-V binaries (.spv) [optionally generate SPIR-V binaries (.spv) for debugging]
 compile_slang(
@@ -190,7 +261,7 @@ compile_slang(
   "${CMAKE_BINARY_DIR}/${PROJECT_NAME}/_autogen"
   HEADERS_VAR GENERATED_SHADER_HEADERS
   # SPVS_VAR GENERATED_SHADER_SPIRV  # For debugging purpose
-  EXTRA_FLAGS "-I${NVSHADERS_DIR}"
+  EXTRA_FLAGS ${SHADER_EXTRA_FLAGS}
   DEBUG_LEVEL ${SHADER_DEBUG_LEVEL}
   OPTIMIZATION_LEVEL ${SHADER_OPT_LEVEL}
   CAPABILITIES ${SHADER_CAPABILITIES}
@@ -208,6 +279,15 @@ target_sources(${PROJECT_NAME} PRIVATE
   ${SHADER_H_FILES}
   ${SHADER_SHARED_SLANG_FILES}
 )
+if(VKGLTF_ENABLE_NRC)
+  add_custom_target(nrc_generated_shader_headers DEPENDS ${GENERATED_SHADER_HEADERS})
+  add_dependencies(nrc nrc_generated_shader_headers)
+  target_sources(nrc PRIVATE ${GENERATED_SHADER_HEADERS})
+  set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/nrc/nrc_pass.cpp"
+    PROPERTIES OBJECT_DEPENDS "${GENERATED_SHADER_HEADERS}"
+  )
+endif()
 
 
 #####################################################################################

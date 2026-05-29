@@ -27,6 +27,8 @@
 #include <GLFW/glfw3.h>
 #undef APIENTRY
 
+#include <algorithm>
+
 #include <nvaftermath/aftermath.hpp>
 #include <nvapp/application.hpp>
 #include <nvapp/elem_dbgprintf.hpp>
@@ -41,6 +43,7 @@
 #include "renderer.hpp"
 #include "docs/app_icon_png.h"
 #include "version.hpp"
+#include "nrc/nrc_pass_integration.h"
 
 nvutils::ProfilerManager g_profilerManager;  // #PROFILER
 
@@ -96,6 +99,8 @@ auto main(int argc, char** argv) -> int
   parameterRegistry.add({"vsyncOffMode", "Preferred VSync Off mode: [0:Immediate, 1:Mailbox, 2:FIFO, 3:FIFO Relax]"},
                         reinterpret_cast<int*>(&appInfo.preferredVsyncOffMode));
   parameterRegistry.add({"floatingWindows", "Allow dock windows to be separate windows"}, &appInfo.hasUndockableViewport, true);
+  int nrcEnabled = 1;
+  parameterRegistry.add({"nrc", "Neural Radiance Cache enable (0=off, 1=on)"}, &nrcEnabled);
 
 
   // Don't show the profiler by default
@@ -143,6 +148,13 @@ auto main(int argc, char** argv) -> int
   VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
   VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT};
   VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV reorderFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV};
+  VkPhysicalDeviceShaderReplicatedCompositesFeaturesEXT replicatedCompositesFeature{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_REPLICATED_COMPOSITES_FEATURES_EXT};
+  VkPhysicalDeviceCooperativeVectorFeaturesNV coopVecFeatures{
+      .sType                     = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_VECTOR_FEATURES_NV,
+      .cooperativeVector         = VK_TRUE,
+      .cooperativeVectorTraining = VK_TRUE,
+  };
   // clang-format on
 
   // Requesting the extensions and features needed
@@ -158,6 +170,8 @@ auto main(int argc, char** argv) -> int
       {VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, &baryFeatures},
       {VK_EXT_NESTED_COMMAND_BUFFER_EXTENSION_NAME, &nestedCmdFeature},
       {VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, &reorderFeature, false},
+      {VK_EXT_SHADER_REPLICATED_COMPOSITES_EXTENSION_NAME, &replicatedCompositesFeature},
+      {VK_NV_COOPERATIVE_VECTOR_EXTENSION_NAME, &coopVecFeatures},
   };
 
   // Only request the graphics queue
@@ -284,6 +298,10 @@ auto main(int argc, char** argv) -> int
   appInfo.physicalDevice = vkContext.getPhysicalDevice();
   appInfo.queues         = vkContext.getQueueInfos();
 
+  const uint32_t nrcFrameWidth  = std::max(1920u, appInfo.windowSize.x);
+  const uint32_t nrcFrameHeight = std::max(1080u, appInfo.windowSize.y);
+  nrc_pass_init(appInfo.device, appInfo.physicalDevice, nrcFrameWidth, nrcFrameHeight);
+  nrc_pass_set_enabled(nrcEnabled);
 
   // Setting up the layout of the application
   appInfo.dockSetup = [](ImGuiID viewportID) {
@@ -358,11 +376,20 @@ auto main(int argc, char** argv) -> int
   app.run();
   app.deinit();
 
+  {
+    uint32_t trainCount = 0;
+    uint32_t queryCount = 0;
+    nrc_pass_readback_counts(&trainCount, &queryCount);
+    fprintf(stdout, "[NRC] last frame: training=%u queries=%u\n", trainCount, queryCount);
+  }
+
   // Clear callbacks before scope ends to avoid dangling references
   nvutils::Logger::getInstance().setLogCallback(nullptr);
 #if defined(USE_NSIGHT_AFTERMATH)
   nvvk::CheckError::getInstance().setCallbackFunction(nullptr);
 #endif
+
+  nrc_pass_destroy();
 
   // Deinit Vulkan context
   vkContext.deinit();

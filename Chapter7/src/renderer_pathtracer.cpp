@@ -26,6 +26,7 @@
 
 #include <fmt/format.h>
 #include <chrono>
+#include <cstdint>
 #include <thread>
 #include <vector>
 
@@ -39,9 +40,18 @@
 #include <nvgui/tooltip.hpp>
 
 #include "renderer_pathtracer.hpp"
+#include "nrc/nrc_pass_integration.h"
 
 // Pre-compiled shaders
 #include "_autogen/gltf_pathtrace.slang.h"
+
+static void updateNrcFrameState(Resources& resources, uint32_t numSamples, uint32_t totalSamplesAccumulated, bool firstFrame)
+{
+  const VkExtent2D size = resources.gBuffers.getSize();
+  nrc_pass_set_render_size(size.width, size.height);
+  nrc_pass_set_out_image_view(resources.gBuffers.getColorImageView(Resources::eImgRendered));
+  nrc_pass_set_accumulation_params(totalSamplesAccumulated, numSamples, firstFrame ? 1 : 0);
+}
 
 // Toggle deferred host operations for RTX pipeline creation.
 // 1 = use VkDeferredOperationKHR to parallelize SPIR-V->ISA compilation across worker threads.
@@ -92,7 +102,7 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   m_supportSER = (bool)(m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_NV) ?
                      true :
                      false;
-  m_useSER = m_supportSER;
+  m_useSER = false;
 
   // If SER is not supported, force recompiling without SER
   compileShader(resources, (m_supportSER == true) ? false : true);
@@ -124,6 +134,7 @@ void PathTracer::registerParameters(nvutils::ParameterRegistry* paramReg)
   paramReg->add({"ptFocalDistance", "PathTracer: Focal distance"}, &m_pushConst.focalDistance);
   paramReg->add({"ptAutoFocus", "PathTracer: Enable auto focus"}, &m_autoFocus);
   paramReg->add({"ptTechnique", "PathTracer: Rendering technique [RayQuery:0, RayTracing:1]"}, (int*)&m_renderTechnique);
+  paramReg->add({"ptAccumulate", "PathTracer: Accumulate samples over time"}, &m_accumulate);
   paramReg->add({"ptAdaptiveSampling", "PathTracer: Enable adaptive sampling"}, &m_adaptiveSampling);
   paramReg->add({"ptPerformanceTarget", "PathTracer: Performance target [Interactive:0, Balanced:1, Quality:2, MaxQuality:3]"},
                 (int*)&m_performanceTarget);
@@ -141,6 +152,7 @@ void PathTracer::registerParameters(nvutils::ParameterRegistry* paramReg)
 void PathTracer::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
 {
   settingsHandler->setSetting("ptTechnique", (int*)&m_renderTechnique);
+  settingsHandler->setSetting("ptAccumulate", &m_accumulate);
   settingsHandler->setSetting("ptAdaptiveSampling", &m_adaptiveSampling);
   settingsHandler->setSetting("ptPerformanceTarget", (int*)&m_performanceTarget);
   settingsHandler->setSetting("ptMaxDepth", &m_pushConst.maxDepth);
@@ -256,14 +268,70 @@ bool PathTracer::onUIRender(Resources& resources)
                                "Ray-footprint gradient scale for texture LOD.\n"
                                "0 = always mip 0 (sharpest, relies on MC accumulation for AA).\n"
                                "1 = full physically-derived LOD (default, may look soft at distance).");
+    constexpr const char* nrcViewModes   = "None\0NRC\0Cache Debug\0\0";
+    constexpr const char* nrcViewTooltip =
+        "None: full path tracing without neural-cache termination.\n"
+        "NRC: final rendered image using the neural radiance cache for the indirect tail.\n"
+        "Cache Debug: diagnostic view of the neural cache estimate only.";
+    int leftNrcView  = static_cast<int>(m_pushConst.nrcLeftViewMode);
+    int rightNrcView = static_cast<int>(m_pushConst.nrcRightViewMode);
+    if(PE::Combo("NRC Left", &leftNrcView, nrcViewModes, -1, nrcViewTooltip))
+    {
+      m_pushConst.nrcLeftViewMode = static_cast<uint32_t>(leftNrcView);
+      changed                     = true;
+    }
+    if(PE::Combo("NRC Right", &rightNrcView, nrcViewModes, -1, nrcViewTooltip))
+    {
+      m_pushConst.nrcRightViewMode = static_cast<uint32_t>(rightNrcView);
+      changed                      = true;
+    }
+
+    ImGui::BeginDisabled(!nrc_pass_enabled());
+    bool nrcUseEmaWeights = nrc_pass_use_ema_weights() != 0;
+    if(PE::Checkbox("Use EMA", &nrcUseEmaWeights, "Use exponential moving-average NRC weights for inference"))
+    {
+      nrc_pass_set_use_ema_weights(nrcUseEmaWeights ? 1 : 0);
+      m_totalSamplesAccumulated = 0;
+      changed                   = true;
+    }
+    bool nrcTrainingLocked = nrc_pass_training_locked() != 0;
+    if(PE::Checkbox("Lock", &nrcTrainingLocked, "Freeze NRC training while keeping cache inference active"))
+    {
+      nrc_pass_set_training_locked(nrcTrainingLocked ? 1 : 0);
+      m_totalSamplesAccumulated = 0;
+      changed                   = true;
+    }
+    if(nrcTrainingLocked)
+    {
+      ImGui::SameLine();
+      if(ImGui::Button("Train 1-Frame"))
+      {
+        nrc_pass_train_one_frame();
+        resources.forcedRenderFrames = 1;
+        m_totalSamplesAccumulated    = 0;
+      }
+    }
+    if(ImGui::Button("Re-Train"))
+    {
+      nrc_pass_retrain();
+      m_totalSamplesAccumulated = 0;
+      changed                   = true;
+    }
+    ImGui::EndDisabled();
     PE::end();
   }
 
   // Manual sampling controls
   if(PE::begin())
   {
-    PE::SliderInt("Max Iterations", &resources.settings.maxFrames, 0, 10000, "%d", 0, "Maximum number of iterations");
-    ImGui::BeginDisabled(m_adaptiveSampling || isDlssEnabled());
+    PE::SliderInt("Max Iterations", &resources.settings.maxFrames, 0, 10000, "%d", 0,
+                  "Maximum number of progressive render frames. NRC Train 1-Frame can request one internal frame without changing this value.");
+    if(PE::Checkbox("Accumulate", &m_accumulate, "Accumulate samples over time"))
+    {
+      m_totalSamplesAccumulated = 0;
+      changed                   = true;
+    }
+    ImGui::BeginDisabled(m_adaptiveSampling || isDlssEnabled() || nrc_pass_enabled());
     PE::SliderInt("Samples", &m_pushConst.numSamples, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL, "%d", 0,
                   "Number of samples per pixel");
     ImGui::EndDisabled();
@@ -272,15 +340,30 @@ bool PathTracer::onUIRender(Resources& resources)
       ImGui::SameLine();
       ImGui::TextDisabled("(DLSS: 1 spp)");
     }
+    else if(nrc_pass_enabled())
+    {
+      ImGui::SameLine();
+      ImGui::TextDisabled("(NRC: 1 spp)");
+    }
 
     // Adaptive sampling controls
-    ImGui::BeginDisabled(isDlssEnabled());
-    PE::Checkbox("Auto SPP", &m_adaptiveSampling, "Automatically adjust samples per pixel based on performance target");
+    if(nrc_pass_enabled() && m_adaptiveSampling)
+    {
+      m_adaptiveSampling = false;
+      changed            = true;
+    }
+    ImGui::BeginDisabled(isDlssEnabled() || nrc_pass_enabled());
+    changed |= PE::Checkbox("Auto SPP", &m_adaptiveSampling, "Automatically adjust samples per pixel based on performance target");
     ImGui::EndDisabled();
     if(isDlssEnabled())
     {
       ImGui::SameLine();
       ImGui::TextDisabled("(DLSS disabled)");
+    }
+    else if(nrc_pass_enabled())
+    {
+      ImGui::SameLine();
+      ImGui::TextDisabled("(NRC: fixed 1 spp)");
     }
     if(m_adaptiveSampling)
     {
@@ -296,9 +379,11 @@ bool PathTracer::onUIRender(Resources& resources)
       }
     }
     // Performance info - always visible
-    const int   frames      = resources.frameCount + 1;
-    const float sppPerFrame = (frames > 0) ? float(m_totalSamplesAccumulated) / float(frames) : 0.f;
-    ImGui::TextDisabled("Samples/pixel: %d", m_totalSamplesAccumulated);
+    const int   frames       = resources.frameCount + 1;
+    const int   shownSamples = m_accumulate ? m_totalSamplesAccumulated : m_pushConst.numSamples;
+    const float sppPerFrame  = m_accumulate ? ((frames > 0) ? float(shownSamples) / float(frames) : 0.f) :
+                                             float(m_pushConst.numSamples);
+    ImGui::TextDisabled("Samples/pixel: %d", shownSamples);
     ImGui::TextDisabled("Frames: %d (%.1f spp/frame)", frames, sppPerFrame);
     ImGui::TextDisabled("Throughput: %.2f MSPP/s", m_throughputRollingAvg.getAverage());
     nvgui::tooltip(fmt::format("Mega-sample-pixels per second (rolling average over last {} frames)",
@@ -614,6 +699,8 @@ void PathTracer::createPipeline(Resources& resources)
   SCOPED_TIMER(__FUNCTION__);
   std::vector<VkDescriptorSetLayout> descriptorSetLayouts{resources.descriptorSetLayout[0], resources.descriptorSetLayout[1],
                                                           resources.hdrIbl.getDescriptorSetLayout()};
+  if(VkDescriptorSetLayout nrcLayout = nrc_pass_descriptor_set_layout())
+    descriptorSetLayouts.push_back(nrcLayout);
 
   // Creating the pipeline layout
   VkPushConstantRange        pushConstant{VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant)};
@@ -907,6 +994,8 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
 
   std::vector<VkDescriptorSetLayout> descriptorSetLayouts{resources.descriptorSetLayout[0], resources.descriptorSetLayout[1],
                                                           resources.hdrIbl.getDescriptorSetLayout()};
+  if(VkDescriptorSetLayout nrcLayout = nrc_pass_descriptor_set_layout())
+    descriptorSetLayouts.push_back(nrcLayout);
 
   VkShaderCreateInfoEXT shaderInfo{
       .sType                  = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
@@ -980,6 +1069,12 @@ void PathTracer::destroyPipelines()
 // Update adaptive sampling based on frame timing
 void PathTracer::updateAdaptiveSampling(Resources& resources)
 {
+  if(nrc_pass_enabled())
+  {
+    m_pushConst.numSamples = 1;
+    return;
+  }
+
   // Don't update adaptive sampling if DLSS is enabled
   if(isDlssEnabled())
     return;
@@ -1051,9 +1146,8 @@ void PathTracer::updateStatistics(Resources& resources)
     // Update rolling average with wall-clock throughput for this frame
     m_throughputRollingAvg.addValue(megaSamplePixelsPerSecond);
   }
-
-  // Track total samples accumulated
-  m_totalSamplesAccumulated += m_pushConst.numSamples;
+  // m_totalSamplesAccumulated is advanced in setupPushConstant() after the
+  // shader receives the pre-frame history count.
 }
 
 void PathTracer::renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources)
@@ -1070,6 +1164,15 @@ void PathTracer::renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, R
   VkShaderStageFlagBits stage = VK_SHADER_STAGE_COMPUTE_BIT;
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_rqPipeline);
 
+  const bool nrcFrameEnabled = (m_pushConst.flags & shaderio::ePtNrcEnabled) != 0;
+  if(nrcFrameEnabled)
+  {
+    const bool firstFrameOrReset = !m_accumulate || (resources.frameCount == 0)
+                                   || (m_pushConst.flags & shaderio::ePtUseDlss) != 0;
+    updateNrcFrameState(resources, uint32_t(m_pushConst.numSamples), uint32_t(m_pushConst.totalSamples),
+                        firstFrameOrReset);
+    nrc_pass_record_frame(cmd, m_pushConst.frameCount);
+  }
 
   // Bind the descriptor set: TLAS, output image, textures, etc. (Set: 0)
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &resources.descriptorSet, 0, nullptr);
@@ -1078,11 +1181,20 @@ void PathTracer::renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, R
   VkDescriptorSet hdrDescSet = resources.hdrIbl.getDescriptorSet();
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 2, 1, &hdrDescSet, 0, nullptr);
 
+  if(nrcFrameEnabled)
+  {
+    if(VkDescriptorSet nrcSet = nrc_pass_descriptor_set())
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 3, 1, &nrcSet, 0, nullptr);
+  }
+
   pushDescriptorSet(cmd, resources, VK_PIPELINE_BIND_POINT_COMPUTE);
 
   // Dispatch the compute shader
   VkExtent2D numGroups = nvvk::getGroupCounts(renderingSize, WORKGROUP_SIZE);
   vkCmdDispatch(cmd, numGroups.width, numGroups.height, 1);
+
+  if(nrcFrameEnabled)
+    nrc_pass_record_frame_post(cmd, m_pushConst.frameCount);
 }
 
 void PathTracer::renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, Resources& resources)
@@ -1098,6 +1210,16 @@ void PathTracer::renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, 
   // Bind the ray tracing pipeline
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtxPipeline);
 
+  const bool nrcFrameEnabled = (m_pushConst.flags & shaderio::ePtNrcEnabled) != 0;
+  if(nrcFrameEnabled)
+  {
+    const bool firstFrameOrReset = !m_accumulate || (resources.frameCount == 0)
+                                   || (m_pushConst.flags & shaderio::ePtUseDlss) != 0;
+    updateNrcFrameState(resources, uint32_t(m_pushConst.numSamples), uint32_t(m_pushConst.totalSamples),
+                        firstFrameOrReset);
+    nrc_pass_record_frame(cmd, m_pushConst.frameCount);
+  }
+
   // Bind the descriptor set: TLAS, output image, textures, etc. (Set: 0)
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 0, 1, &resources.descriptorSet, 0, nullptr);
 
@@ -1105,11 +1227,20 @@ void PathTracer::renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, 
   VkDescriptorSet hdrDescSet = resources.hdrIbl.getDescriptorSet();
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 2, 1, &hdrDescSet, 0, nullptr);
 
+  if(nrcFrameEnabled)
+  {
+    if(VkDescriptorSet nrcSet = nrc_pass_descriptor_set())
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 3, 1, &nrcSet, 0, nullptr);
+  }
+
   pushDescriptorSet(cmd, resources, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
 
 
   vkCmdTraceRaysKHR(cmd, &m_sbtRegions.raygen, &m_sbtRegions.miss, &m_sbtRegions.hit, &m_sbtRegions.callable,
                     renderingSize.width, renderingSize.height, 1);
+
+  if(nrcFrameEnabled)
+    nrc_pass_record_frame_post(cmd, m_pushConst.frameCount);
 }
 
 void PathTracer::denoiseDlss(VkCommandBuffer cmd, Resources& resources)
@@ -1154,7 +1285,7 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources)
   int frameCount = resources.frameCount;
 
   // Handle frame reset detection (needed for both adaptive and non-adaptive modes)
-  if(resources.frameCount == 0)
+  if(resources.frameCount == 0 || !m_accumulate)
   {
     m_totalSamplesAccumulated = 0;  // Reset sample counter when scene/camera changes
   }
@@ -1190,6 +1321,20 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources)
   bool useOptixDenoiser = getEffectiveOptixEnabled(resources);
 #endif
   m_pushConst.frameCount = frameCount;
+
+  bool nrcCompatibleThisFrame = nrc_pass_enabled() != 0;
+#if defined(USE_DLSS)
+  nrcCompatibleThisFrame = nrcCompatibleThisFrame && !useDlss;
+#endif
+  const VkExtent2D nrcRenderSize = resources.gBuffers.getSize();
+  const uint64_t   nrcPixelCount = uint64_t(nrcRenderSize.width) * uint64_t(nrcRenderSize.height);
+  const uint64_t   nrcCapacity   = uint64_t(nrc_pass_query_capacity());
+  nrcCompatibleThisFrame         = nrcCompatibleThisFrame && (nrcCapacity != 0 && nrcPixelCount <= nrcCapacity);
+  if(nrcCompatibleThisFrame)
+  {
+    m_pushConst.numSamples = 1;
+  }
+
   // First-frame flag must use resources.frameCount so depth and ObjectID are written on app frame 0 and after
   // every reset (camera/scene change). The local frameCount can be overridden to a Halton index when DLSS
   // is on and never resets; using it for ePtFirstFrame would only write depth once and break selection/depth.
@@ -1200,12 +1345,21 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources)
 #if defined(USE_OPTIX_DENOISER)
   m_pushConst.flags |= useOptixDenoiser ? shaderio::ePtUseOptixDenoiser : 0;
 #endif
-  m_pushConst.totalSamples = m_totalSamplesAccumulated;
+  m_pushConst.flags |= m_accumulate ? shaderio::ePtAccumulate : 0;
+  m_pushConst.flags |= nrcCompatibleThisFrame ? shaderio::ePtNrcEnabled : 0;
+  m_pushConst.nrcTrainingRayThreshold = nrc_pass_training_ray_threshold();
+  m_pushConst.nrcTrainingCapacity     = nrc_pass_training_capacity();
+  m_pushConst.nrcQueryCapacity        = nrc_pass_query_capacity();
+  m_pushConst.totalSamples            = m_accumulate ? m_totalSamplesAccumulated : 0;
   m_pushConst.frameInfo    = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
   m_pushConst.skyParams    = (shaderio::SkyPhysicalParameters*)resources.bSkyParams.address;
   m_pushConst.gltfScene    = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
   m_pushConst.mouseCoord   = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
   vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &m_pushConst);
+  if(m_accumulate)
+  {
+    m_totalSamplesAccumulated += m_pushConst.numSamples;
+  }
 }
 
 //--------------------------------------------------------------------------------------------------

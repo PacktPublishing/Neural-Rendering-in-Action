@@ -55,6 +55,8 @@ static bool doDebug = false;
 #include "nvshaders/wireframe.h.slang"
 #endif
 
+#include "nrc_patch_pathtrace.slang"
+
 
 // clang-format off
 
@@ -74,6 +76,39 @@ static bool doDebug = false;
 [[vk::constant_id(1)]]  int USE_DLSS_TRANSP = 0; // Primary surface selection mode
 
 // clang-format on
+
+uint nrcViewModeForPixel(float2 samplePos, float2 imageSize)
+{
+  if(!hasFlag(pushConst.flags, PathtracerFlags::ePtNrcEnabled))
+    return uint(NrcViewMode::eNrcViewNone);
+
+  return (samplePos.x < imageSize.x * 0.5f) ? pushConst.nrcLeftViewMode : pushConst.nrcRightViewMode;
+}
+
+bool nrcViewUsesNetwork(uint viewMode)
+{
+  return viewMode == uint(NrcViewMode::eNrcViewNrc) || viewMode == uint(NrcViewMode::eNrcViewCacheDebug);
+}
+
+bool nrcViewIsCacheDebug(uint viewMode)
+{
+  return viewMode == uint(NrcViewMode::eNrcViewCacheDebug);
+}
+
+void nrcMaterialReflectance(PbrMaterial mat, out float3 diffuseReflectance, out float3 specularReflectance)
+{
+  float  metallic = saturate(mat.metallic);
+  float3 base     = max(mat.baseColor, float3(0.0));
+
+  diffuseReflectance = base * (1.0 - metallic);
+
+  float denom = max(abs(mat.ior1 + mat.ior2), 1e-3);
+  float eta   = (mat.ior2 - mat.ior1) / denom;
+  float dielectricF0 = eta * eta;
+  float3 dielectricSpecular = min(float3(1.0), dielectricF0 * saturate(mat.specular) * max(mat.specularColor, float3(0.0)));
+
+  specularReflectance = lerp(dielectricSpecular, base, metallic);
+}
 
 
 //-----------------------------------------------------------------------
@@ -912,7 +947,9 @@ bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout
 SampleResult pathTrace(IRaytracer raytracer,
                        RayDesc    ray,
                        inout uint seed,
-                       float      pixelAngle
+                       float      pixelAngle,
+                       uint       nrcPixelIdx,
+                       uint       nrcViewMode
 #if WIREFRAME
                        ,
                        float3 wireDiffX,
@@ -943,6 +980,30 @@ SampleResult pathTrace(IRaytracer raytracer,
 
   int scatterBounces = 0;
 
+  float  nrcSpreadSqrtSum     = 0.0;
+  float  nrcA0                = 0.0;
+  float3 nrcPrevVertexPos     = float3(0);
+  bool   nrcHavePrevVertex    = false;
+  bool   nrcEmittedQuery      = false;
+  bool   nrcOnFlag            = nrcViewUsesNetwork(nrcViewMode);
+  bool   nrcCacheDebugView    = nrcViewIsCacheDebug(nrcViewMode);
+  bool   nrcScreenPrefixValid = false;
+  float3 nrcScreenPrefixRadiance = float3(0);
+
+  bool nrcIsTraining = nrcOnFlag && nrcIsTrainingRayI(nrcPixelIdx, uint(pushConst.frameCount), pushConst.nrcTrainingRayThreshold);
+  bool nrcIsUnbiased = nrcIsTraining && nrcIsUnbiasedRRPath(nrcPixelIdx, uint(pushConst.frameCount));
+
+  NrcPendingRecord nrcStack[kNrcMaxStack];
+  int    nrcStackSize        = 0;
+  float3 nrcLastPos          = float3(0);
+  float2 nrcLastViewSph      = float2(0);
+  float2 nrcLastNormSph      = float2(0);
+  float  nrcLastRoughness    = 0.0;
+  float3 nrcLastDiffuse      = float3(0);
+  float3 nrcLastSpecular     = float3(0);
+  float3 nrcLastThroughputEye = float3(1);
+  bool   nrcSuffixTerminated = false;
+
   // Path tracing loop, until the ray hits the environment or the maximum depth is reached or the ray is absorbed.
   // surfaceDepth advances ONLY on actual surface bounces (at the bottom of the loop). Volume scatter events
   // `continue` past that increment, so volume chains never consume the surface bounce budget; they are bounded
@@ -955,6 +1016,9 @@ SampleResult pathTrace(IRaytracer raytracer,
 
     bool   nextEventValid = false;      // If the next event is valid, then we can sample the BSDF for the light
     float3 contribution   = float3(0);  // Direct lighting contribution
+    float3 nrcDirectEyeContribution = float3(0);
+    int    nrcDirectFoldCount = 0;
+    bool   nrcFoldDirectForTraining = false;
 
     // Shadow ray data (minimal extraction to reduce live state)
     float16_t3 shadowRayPos;
@@ -1006,6 +1070,7 @@ SampleResult pathTrace(IRaytracer raytracer,
           if(hasFlag(frameInfo->flags, SceneFrameInfoFlags::eSceneUseSolidBackground))
           {
             radiance = frameInfo->backgroundColor;
+            nrcSuffixTerminated = true;
             break;
           }
           else if(hasFlag(pushConst.frameInfo->flags, SceneFrameInfoFlags::eSceneUseHdrEnvironment)
@@ -1014,6 +1079,7 @@ SampleResult pathTrace(IRaytracer raytracer,
             float3 dir = rotate(ray.Direction, float3(0, 1, 0), -frameInfo->envRotation);
             float2 uv  = getSphericalUv(dir);  // See sampling.glsl
             radiance = smoothHDRBlur(texturesHdr[HDR_IMAGE_INDEX], uv, frameInfo->envBlur).xyz * frameInfo->envIntensity;
+            nrcSuffixTerminated = true;
             break;
           }
         }
@@ -1034,8 +1100,18 @@ SampleResult pathTrace(IRaytracer raytracer,
         // We may hit the environment twice: once via sampleLights() and once when hitting the sky while probing
         // for more indirect hits. This is the counter part of the MIS weighting in sampleLights()
         float misWeight = computeEnvHitMisWeight(lastSamplePdf, envPdf);
-        radiance += throughput * misWeight * envColor;
+        float3 envContribution = throughput * misWeight * envColor;
+        radiance += envContribution;
+        if(nrcIsTraining && nrcStackSize > 0)
+        {
+          [loop]
+          for(int k = 0; k < nrcStackSize; ++k)
+          {
+            nrcStack[k].suffixDirect += envContribution / max(nrcStack[k].startThroughputEye, float3(1e-6));
+          }
+        }
 
+        nrcSuffixTerminated = true;
         break;
       }
 
@@ -1055,7 +1131,10 @@ SampleResult pathTrace(IRaytracer raytracer,
         {
           bool continuePath = handleShadowCatcher(raytracer, hit, pbrMat, ray, radiance, throughput, lastSamplePdf, seed, frameInfo);
           if(!continuePath)
+          {
+            nrcSuffixTerminated = true;
             break;
+          }
           continue;
         }
       }
@@ -1128,13 +1207,24 @@ SampleResult pathTrace(IRaytracer raytracer,
 
 
       // Adding emissive
-      radiance += pbrMat.emissive * throughput;
+      float3 nrcEmissiveContribution = pbrMat.emissive * throughput;
+      radiance += nrcEmissiveContribution;
 
 #if MAT_EXT_UNLIT
       // Unlit
       if(material.unlit > 0)
       {
-        radiance += pbrMat.baseColor;
+        float3 unlitContribution = pbrMat.baseColor;
+        radiance += unlitContribution;
+        if(nrcIsTraining && nrcStackSize > 0)
+        {
+          [loop]
+          for(int k = 0; k < nrcStackSize; ++k)
+          {
+            nrcStack[k].suffixDirect += unlitContribution / max(nrcStack[k].startThroughputEye, float3(1e-6));
+          }
+        }
+        nrcSuffixTerminated = true;
         break;
       }
 #endif
@@ -1165,7 +1255,10 @@ SampleResult pathTrace(IRaytracer raytracer,
           {
             float rrPcont = min(max(throughput.x, max(throughput.y, throughput.z)) + RR_PCONT_FLOOR, RR_PCONT_CAP);
             if(rand(seed) >= rrPcont)
+            {
+              nrcSuffixTerminated = true;
               break;
+            }
             throughput /= rrPcont;
           }
           continue;  // skips the surfaceDepth++ at the bottom of the loop
@@ -1214,8 +1307,16 @@ SampleResult pathTrace(IRaytracer raytracer,
         bsdfSample(sampleData, pbrMat);
         // bsdfSampleSimple(sampleData, pbrMat);
 
+        if(nrcOnFlag && nrcIsTraining)
+        {
+          nrcFoldDirectForTraining = true;
+          nrcDirectFoldCount       = nrcStackSize;
+          nrcDirectEyeContribution = nrcEmissiveContribution;
+        }
+
         // Update the throughput
         throughput *= sampleData.bsdf_over_pdf;
+        float3 nrcThroughputAfterScatter = throughput;
         ray.Direction = sampleData.k2;  // new direction
         lastSamplePdf = sampleData.pdf;
 
@@ -1231,6 +1332,112 @@ SampleResult pathTrace(IRaytracer raytracer,
           // Continue path
           bool isSpecular     = (sampleData.event_type & BSDF_EVENT_IMPULSE) != 0;
           bool isTransmission = (sampleData.event_type & BSDF_EVENT_TRANSMISSION) != 0;
+
+          if(nrcOnFlag)
+          {
+            float cosThetaHere = max(abs(dot(sampleData.k2, pbrMat.N)), 1e-3);
+            if(!nrcHavePrevVertex)
+            {
+              float d0 = payload.hitT;
+              nrcA0 = (d0 * d0) / max(4.0 * 3.14159265 * cosThetaHere, 1e-6);
+              nrcPrevVertexPos = hit.pos;
+              nrcHavePrevVertex = true;
+            }
+            else
+            {
+              float3 seg = hit.pos - nrcPrevVertexPos;
+              float  d   = length(seg);
+              float  p   = lastSamplePdf;
+              nrcSpreadSqrtSum += nrcSpreadContribution(d, p, cosThetaHere);
+              nrcPrevVertexPos = hit.pos;
+            }
+          }
+
+          if(nrcOnFlag && nrcIsTraining && !isSpecular && !isTransmission)
+          {
+            float3 v_pos  = hit.pos;
+            float2 v_vsph = sphEncode(sampleData.k2);
+            float2 v_nsph = sphEncode(pbrMat.N);
+            float  v_r    = pbrMat.roughness.x;
+            float3 v_d;
+            float3 v_s;
+            nrcMaterialReflectance(pbrMat, v_d, v_s);
+
+            bool shouldStoreTrainingVertex = nrcCacheDebugView || nrcSpreadExceeds(nrcSpreadSqrtSum, nrcA0);
+            if(shouldStoreTrainingVertex)
+            {
+              NrcPendingRecord e;
+              e.position           = v_pos;
+              e.viewDirSph         = v_vsph;
+              e.normalSph          = v_nsph;
+              e.roughness          = v_r;
+              e.diffuseAlbedo      = v_d;
+              e.specularAlbedo     = v_s;
+              e.suffixDirect       = float3(0);
+              e.startThroughputEye = nrcThroughputAfterScatter;
+              e.vertexIndex        = uint(nrcStackSize);
+              if(nrcStackSize < kNrcMaxStack)
+              {
+                nrcStack[nrcStackSize] = e;
+                nrcStackSize++;
+              }
+            }
+
+            nrcLastPos           = v_pos;
+            nrcLastViewSph       = v_vsph;
+            nrcLastNormSph       = v_nsph;
+            nrcLastRoughness     = v_r;
+            nrcLastDiffuse       = v_d;
+            nrcLastSpecular      = v_s;
+            nrcLastThroughputEye = nrcThroughputAfterScatter;
+          }
+
+          if(nrcOnFlag && !nrcEmittedQuery && !isSpecular && !isTransmission)
+          {
+            bool nrcShouldQuery = nrcCacheDebugView || nrcSpreadExceeds(nrcSpreadSqrtSum, nrcA0);
+            if(nrcShouldQuery)
+            {
+              float3 nrcPrefixRadiance = radiance;
+
+              if(nrcCacheDebugView)
+              {
+                nrcPrefixRadiance = float3(0);
+              }
+              else if(nextEventValid)
+              {
+                float3 shadowOffsetDir = dot(directLight.direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
+                RayDesc shadowRay;
+                shadowRay.Origin    = safeOffsetRay(hit.shadowPos, shadowOffsetDir);
+                shadowRay.Direction = directLight.direction;
+                shadowRay.TMin      = 0.0;
+                shadowRay.TMax      = directLight.distance;
+                float3 shadowFactor = raytracer.TraceShadow(shadowRay, seed);
+                nrcPrefixRadiance += contribution * shadowFactor;
+              }
+
+              float3 nrcDiffuseReflectance;
+              float3 nrcSpecularReflectance;
+              nrcMaterialReflectance(pbrMat, nrcDiffuseReflectance, nrcSpecularReflectance);
+              nrcEmitQuery(hit.pos,
+                           sampleData.k2,
+                           pbrMat.N,
+                           pbrMat.roughness.x,
+                           nrcDiffuseReflectance,
+                           nrcSpecularReflectance,
+                           nrcPixelIdx,
+                           nrcThroughputAfterScatter,
+                           pushConst.nrcQueryCapacity);
+              nrcScreenPrefixRadiance = nrcPrefixRadiance;
+              nrcScreenPrefixValid    = true;
+              nrcEmittedQuery         = true;
+              if(!nrcIsTraining)
+              {
+                radiance     = nrcPrefixRadiance;
+                surfaceDepth = pushConst.maxDepth;
+                break;
+              }
+            }
+          }
 
           float3 offsetDir = dot(ray.Direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
           ray.Origin       = safeOffsetRay(hit.pos, offsetDir);
@@ -1249,6 +1456,7 @@ SampleResult pathTrace(IRaytracer raytracer,
         {
           // Exit tracing rays, but still finish this iteration; in particular the visibility test
           // for the light that we may have hit.
+          nrcSuffixTerminated = true;
           surfaceDepth = pushConst.maxDepth;
         }
 
@@ -1273,7 +1481,18 @@ SampleResult pathTrace(IRaytracer raytracer,
       shadowRay.TMin      = 0.0;
       shadowRay.TMax      = shadowRayDist;
       float3 shadowFactor = raytracer.TraceShadow(shadowRay, seed);
-      radiance += contribution * shadowFactor;
+      float3 visibleDirect = contribution * shadowFactor;
+      radiance += visibleDirect;
+      nrcDirectEyeContribution += visibleDirect;
+    }
+
+    if(nrcFoldDirectForTraining && nrcDirectFoldCount > 0)
+    {
+      [loop]
+      for(int k = 0; k < nrcDirectFoldCount; ++k)
+      {
+        nrcStack[k].suffixDirect += nrcDirectEyeContribution / max(nrcStack[k].startThroughputEye, float3(1e-6));
+      }
     }
 
     // Russian-Roulette (minimizing live state)
@@ -1281,13 +1500,37 @@ SampleResult pathTrace(IRaytracer raytracer,
     {
       float rrPcont = min(max(throughput.x, max(throughput.y, throughput.z)) + 0.001F, 0.95F);
       if(rand(seed) >= rrPcont)
+      {
+        nrcSuffixTerminated = true;
         break;                // paths with low throughput that won't contribute
+      }
       throughput /= rrPcont;  // boost the energy of the non-terminated paths
     }
 
     // Surface bounce consumed: advance the surface budget. Volume scatter `continue`s before
     // reaching this point, so it never advances surfaceDepth.
     surfaceDepth++;
+  }
+
+  if(nrcIsTraining && nrcStackSize > 0)
+  {
+    nrcEmitTrainingStack(nrcStack,
+                         nrcStackSize,
+                         nrcLastPos,
+                         nrcLastViewSph,
+                         nrcLastNormSph,
+                         nrcLastRoughness,
+                         nrcLastDiffuse,
+                         nrcLastSpecular,
+                         nrcLastThroughputEye,
+                         /* isUnbiasedRR = */ nrcIsUnbiased,
+                         /* suffixTerminated = */ nrcSuffixTerminated,
+                         pushConst.nrcTrainingCapacity);
+  }
+
+  if(nrcScreenPrefixValid)
+  {
+    radiance = nrcScreenPrefixRadiance;
   }
 
 #if WIREFRAME
@@ -1349,7 +1592,10 @@ SampleResult samplePixel(IRaytracer raytracer,
   computeDifferentials(samplePos, imageSize, viewMatrixI, projMatrixI, wireDiffX, wireDiffY);
 #endif
 
-  SampleResult sampleResult = pathTrace(raytracer, ray, seed, pixelAngle
+  uint nrcPixelIdx = uint(samplePos.y) * uint(imageSize.x) + uint(samplePos.x);
+  uint nrcViewMode = nrcViewModeForPixel(samplePos, imageSize);
+
+  SampleResult sampleResult = pathTrace(raytracer, ray, seed, pixelAngle, nrcPixelIdx, nrcViewMode
 #if WIREFRAME
                                         ,
                                         wireDiffX, wireDiffY
@@ -1435,7 +1681,14 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   }
 
   // Saving result
-  if(firstFrame || hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss))
+  bool nrcOn     = hasFlag(pushConst.flags, PathtracerFlags::ePtNrcEnabled);
+  uint nrcPixIdx = uint(samplePos.y) * uint(imageSize.x) + uint(samplePos.x);
+  if(nrcOn)
+  {
+    g_pathPrefix[nrcPixIdx] = pixelColor;
+    g_nrcContrib[nrcPixIdx] = float4(0.0);
+  }
+  else if(firstFrame || !hasFlag(pushConst.flags, PathtracerFlags::ePtAccumulate) || hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss))
   {  // First frame, replace the value in the buffer
     outImages[int(OutputImage::eResultImage)][int2(samplePos)] = pixelColor;
   }

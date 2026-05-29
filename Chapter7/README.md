@@ -42,34 +42,68 @@ The demo shows a short end-to-end workflow: switching renderer modes, tuning set
 | **CMake** | 3.22 | 3.28+ |
 | **C++ Compiler** | C++20 (MSVC 2022 / GCC 12 / Clang 15) | MSVC 2022 17.8+ |
 | **Vulkan SDK** | 1.3 | [Latest](https://vulkan.lunarg.com/sdk/home) |
+| **RTXNS** | `v1.3.1` | `1a2513120190a43f61c23590811a8b80ec914bd7` |
 
 ### Quick start
 
 ```bash
-# Clone (repositories must be siblings)
+# Clone (repositories should be siblings)
 git clone https://github.com/nvpro-samples/nvpro_core2.git
 git clone https://github.com/nvpro-samples/vk_gltf_renderer.git
+git clone https://github.com/NVIDIA-RTX/RTXNS.git
+
+cd RTXNS
+git checkout 1a2513120190a43f61c23590811a8b80ec914bd7 # v1.3.1
+git submodule update --init --recursive
+cd ..
+
 cd vk_gltf_renderer
 ```
 
 ```bash
 # Windows
-cmake -B build -S . -G "Visual Studio 17 2022" -A x64
+cmake -B build -S . -G "Visual Studio 17 2022" -A x64 -DRTXNS_ROOT=..\RTXNS
 cmake --build build --config Release
 .\_bin\Release\vk_gltf_renderer.exe
 ```
 
 ```bash
 # Linux
-cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release -DRTXNS_ROOT=../RTXNS
 cmake --build build
 ./_bin/vk_gltf_renderer
 ```
+
+### RTXNS dependency
+
+Neural Radiance Cache support is enabled by default through `VKGLTF_ENABLE_NRC=ON`.
+When NRC is enabled, the build requires NVIDIA RTX Neural Shading (`RTXNS`) for the
+Slang MLP and cooperative-vector training shaders.
+
+Use this exact checkout unless you are intentionally updating the NRC shader backend:
+
+```bash
+git clone https://github.com/NVIDIA-RTX/RTXNS.git
+cd RTXNS
+git checkout 1a2513120190a43f61c23590811a8b80ec914bd7 # tag: v1.3.1
+```
+
+CMake accepts the dependency path through `-DRTXNS_ROOT=<path-to-RTXNS>`. If
+`RTXNS_ROOT` is not provided, the build searches these locations relative to the
+renderer source tree:
+
+- `third_party/RTXNS`
+- `RTXNS`
+- `../RTXNS`
+- `../NeuralRadianceCache/RTXNS`
+
+To build without NRC, configure with `-DVKGLTF_ENABLE_NRC=OFF`.
 
 ### Common CMake options
 
 | Option | Default | Description |
 |---|---|---|
+| `VKGLTF_ENABLE_NRC` | `ON` | Enable Neural Radiance Cache integration; requires `RTXNS_ROOT` |
 | `USE_DLSS` | `ON` | Enable DLSS Ray Reconstruction integration |
 | `USE_OPTIX_DENOISER` | `ON` | Enable OptiX AI Denoiser (requires CUDA Toolkit) |
 | `USE_DRACO` | `ON` | Enable Draco mesh compression support |
