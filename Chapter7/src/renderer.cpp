@@ -53,6 +53,7 @@
 #include <thread>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 #include <vulkan/vulkan_core.h>
 #include <webp/decode.h>
 
@@ -66,6 +67,7 @@
 
 // Shader Input/Output
 #include "shaders/shaderio.h"  // Shared between host and device
+#include "nrc/nrc_slang_paths.h"
 
 // Pre-compiled shaders
 #include "_autogen/tonemapper.slang.h"
@@ -307,6 +309,17 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     SCOPED_TIMER("Shader Slang");
     using namespace slang;
     m_resources.slangCompiler.addSearchPaths(nvsamples::getShaderDirs());
+    {
+      size_t             nrcPathCount = 0;
+      const char* const* nrcPaths     = nrc::slangIncludePaths(&nrcPathCount);
+      std::vector<std::filesystem::path> nrcSearchPaths;
+      nrcSearchPaths.reserve(nrcPathCount);
+      for(size_t i = 0; i < nrcPathCount; ++i)
+      {
+        nrcSearchPaths.emplace_back(nrcPaths[i]);
+      }
+      m_resources.slangCompiler.addSearchPaths(nrcSearchPaths);
+    }
     m_resources.slangCompiler.defaultTarget();
     m_resources.slangCompiler.defaultOptions();
 
@@ -324,6 +337,9 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     m_resources.slangCompiler.addCapability("spvRayQueryKHR");             // # Ray query operations
     m_resources.slangCompiler.addCapability("spvGroupNonUniformBallot");  // # Ballot operations for subgroup functionality
     m_resources.slangCompiler.addCapability("spvGroupNonUniformArithmetic");  // # Arithmetic operations across subgroups
+    m_resources.slangCompiler.addCapability("spvImageGatherExtended");  // Slang can emit this through GLSL450 extended instructions
+    m_resources.slangCompiler.addCapability("spvCooperativeVectorNV");
+    m_resources.slangCompiler.addCapability("spvCooperativeVectorTrainingNV");
 
 #if defined(AFTERMATH_AVAILABLE)
     // This aftermath callback is used to report the shader hash (Spirv) to the Aftermath library.
@@ -1607,7 +1623,13 @@ bool GltfRenderer::updateFrameCounter()
 
   if(m_resources.frameCount >= m_resources.settings.maxFrames)
   {
-    return false;
+    if(m_resources.forcedRenderFrames == 0)
+      return false;
+    --m_resources.forcedRenderFrames;
+  }
+  else if(m_resources.forcedRenderFrames > 0)
+  {
+    --m_resources.forcedRenderFrames;
   }
   m_resources.frameCount++;
   return true;
