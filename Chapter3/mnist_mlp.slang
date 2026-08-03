@@ -142,6 +142,9 @@ public struct MNIST_MLP
     // Construct MLP from parameter buffer
     public __init(MNIST_MLP_Params* params)
     {
+        constexpr int layer1_total = (input_size * hidden1_size) + hidden1_size;
+        constexpr int layer2_total = (hidden1_size * hidden2_size) + hidden2_size;
+        
         // Layer 1: 784 → 128
         {
             constexpr int weights_size = input_size * hidden1_size;
@@ -157,7 +160,6 @@ public struct MNIST_MLP
         
         // Layer 2: 128 → 64
         {
-            constexpr int layer1_total = (input_size * hidden1_size) + hidden1_size;
             constexpr int weights_size = hidden1_size * hidden2_size;
             constexpr int biases_offset = layer1_total + weights_size;
             
@@ -171,8 +173,6 @@ public struct MNIST_MLP
         
         // Layer 3: 64 → 10
         {
-            constexpr int layer1_total = (input_size * hidden1_size) + hidden1_size;
-            constexpr int layer2_total = (hidden1_size * hidden2_size) + hidden2_size;
             constexpr int prev_layers = layer1_total + layer2_total;
             constexpr int weights_size = hidden2_size * output_size;
             constexpr int biases_offset = prev_layers + weights_size;

@@ -1,6 +1,4 @@
 // Image-Based Loss for Circle Learning
-// Step 3B: Building toward full image-based autodiff
-// Matching circle_focused_learning.py exactly
 
 // ============================================================================
 // Helper Functions
@@ -17,44 +15,25 @@ float sigmoid(float x) {
 }
 
 // ============================================================================
-// Step 3B.1: Extract Circle Mask from Image
+// Step 3.1: Extract Circle Mask from Image
 // ============================================================================
 
 // Extract circle mask at a single pixel
 // Detects red circle pixels (high red, low green/blue)
 // Returns value between 0 (background) and 1 (circle)
-float extractCircleMaskAtPixel(float red, float green, float blue) {
+// This is only needed for the TARGET, where all we have is an RGB image.
+// The rendered side gets its coverage straight out of renderCircleAtPixel and
+// deliberately does not round-trip through colour - see the note there.
+float extractCircleMaskValue(float red, float green, float blue) {
     float red_strength = sigmoid((red - 0.5) * 20.0);
     float green_penalty = sigmoid((0.5 - green) * 20.0);
     float blue_penalty = sigmoid((0.5 - blue) * 20.0);
-    
+
     return red_strength * green_penalty * blue_penalty;
 }
 
-// Extract mask for entire image
-// Input: RGBA image buffer (flattened)
-// Output: Mask buffer (grayscale, 0-1)
-void extractCircleMask(
-    RWStructuredBuffer<float> image,
-    uint2 image_size,
-    RWStructuredBuffer<float> mask
-) {
-    for (uint y = 0; y < image_size.y; y++) {
-        for (uint x = 0; x < image_size.x; x++) {
-            uint idx = y * image_size.x + x;
-            uint img_idx = idx * 4;  // RGBA
-            
-            float red = image[img_idx + 0];
-            float green = image[img_idx + 1];
-            float blue = image[img_idx + 2];
-            
-            mask[idx] = extractCircleMaskAtPixel(red, green, blue);
-        }
-    }
-}
-
 // ============================================================================
-// Step 3B.2: Compute Image Centroid
+// Step 3.2: Compute Image Centroid
 // ============================================================================
 
 // Compute centroid (center of mass) of a mask
@@ -92,75 +71,10 @@ void computeImageCentroid(
 }
 
 // ============================================================================
-// Step 3B.3: Compute IoU (Intersection over Union)
-// ============================================================================
-
-// Result structure for IoU computation
-struct IoUResult {
-    float intersection_pixels;
-    float union_pixels;
-    float target_pixels;
-    float rendered_pixels;
-    float iou;
-    float iou_loss;
-};
-
-// Compute IoU between target and rendered masks
-// Matches PyTorch: intersection = target * rendered, union = target + rendered - intersection
-IoUResult computeIoU(
-    RWStructuredBuffer<float> target_mask,
-    RWStructuredBuffer<float> rendered_mask,
-    uint2 image_size
-) {
-    IoUResult result;
-    
-    float intersection_sum = 0;
-    float target_sum = 0;
-    float rendered_sum = 0;
-    
-    // Sum over all pixels
-    for (uint y = 0; y < image_size.y; y++) {
-        for (uint x = 0; x < image_size.x; x++) {
-            uint idx = y * image_size.x + x;
-            float t = target_mask[idx];
-            float r = rendered_mask[idx];
-            
-            float intersect = t * r;
-            
-            intersection_sum += intersect;
-            target_sum += t;
-            rendered_sum += r;
-        }
-    }
-    
-    // Union = target + rendered - intersection
-    float union_sum = target_sum + rendered_sum - intersection_sum;
-    
-    // Store pixel counts
-    result.intersection_pixels = intersection_sum;
-    result.union_pixels = union_sum;
-    result.target_pixels = target_sum;
-    result.rendered_pixels = rendered_sum;
-    
-    // Compute IoU and loss
-    if (union_sum > 0) {
-        result.iou = intersection_sum / union_sum;
-        result.iou_loss = 1.0 - result.iou;
-    } else {
-        result.iou = 0;
-        result.iou_loss = 1.0;
-    }
-    
-    return result;
-}
-
-// ============================================================================
-// Step 3B.4: Compute Distance Loss
+// Step 3.4: Compute Distance Loss
 // ============================================================================
 
 // Compute distance between two centroids, normalized by image size (differentiable)
-// Matches PyTorch: centroid_distance = sqrt(sum((target - rendered)^2))
-//                  distance_loss = centroid_distance / image_size
 [Differentiable]
 float computeDistanceLoss(
     no_diff float target_cx, no_diff float target_cy,  // ← Target centroid is constant
@@ -178,11 +92,15 @@ float computeDistanceLoss(
 }
 
 // ============================================================================
-// Step 3B.5: Compute Size Loss and Radius Growth Incentive
+// Step 3.5: Compute Size Loss and Radius Growth Incentive
 // ============================================================================
 
 // Result structure for size loss computation
-struct SizeLossResult {
+// Must conform to IDifferentiable: computeLossFromStatistics returns a value
+// derived from this struct, and without the conformance Slang silently drops
+// the derivative w.r.t. circle_radius (dr collapses to ~0 in the no-overlap
+// branch, where size_penalty is the only radius-dependent term).
+struct SizeLossResult : IDifferentiable {
     float target_radius_estimate;
     float rendered_radius_estimate;
     float size_ratio;
@@ -191,12 +109,6 @@ struct SizeLossResult {
 };
 
 // Compute size-based losses from mask pixel counts (differentiable)
-// Matches PyTorch:
-//   size_ratio = min(target_pixels, rendered_pixels) / max(target_pixels, rendered_pixels)
-//   size_penalty = 1.0 - size_ratio
-//   target_radius_estimate = sqrt(target_pixels / pi)
-//   rendered_radius_estimate = sqrt(rendered_pixels / pi)
-//   radius_growth_incentive = relu(target_radius - rendered_radius) / image_size
 [Differentiable]
 SizeLossResult computeSizeLoss(
     no_diff float target_pixels,     // ← Target pixel count is constant
@@ -226,34 +138,39 @@ SizeLossResult computeSizeLoss(
 }
 
 // ============================================================================
-// Step 3B.6: Unified Loss Computation (All Components Combined)
+// Step 3.6: Unified Loss Computation (All Components Combined)
 // ============================================================================
+
+// Controls how wide the soft edge of the circle is, in pixels.
+// This is the single most important number in this file. All of the gradient
+// that reaches circle_x/y/radius comes from the band of pixels where this
+// sigmoid is actually transitioning, so that band has to be at least a pixel
+// or two wide. If it is narrower than the pixel spacing, the grid steps clean
+// over it and the measured gradient is alternately enormous and exactly zero.
+// 2.0 gives a ~2.2 pixel 10%-90% transition: wide enough that several pixels
+// always sample it, narrow enough that the rendered disc still looks crisp.
+static const float EDGE_SHARPNESS = 2.0;
 
 // Render circle at a single pixel (differentiable)
 // Returns alpha value [0, 1] for smooth circle rendering
 // MUST be [Differentiable] because:
-// 1. Called inside computeCircleLossDifferentiable (line 286)
+// 1. Called inside computeCircleLossDifferentiable
 // 2. Takes circle_x, circle_y, circle_radius as parameters (the vars we optimize!)
 // 3. Without this, ∂loss/∂circle_x, ∂loss/∂circle_y, ∂loss/∂circle_radius cannot be computed
 [Differentiable]
 float renderCircleAtPixel(no_diff float px, no_diff float py, float circle_x, float circle_y, float circle_radius) {
     float dx = px - circle_x;
     float dy = py - circle_y;
-    float dist_sq = dx * dx + dy * dy;
-    float radius_sq = circle_radius * circle_radius + 1e-6;
-    
-    // Smooth circle edge using sigmoid
-    float alpha = sigmoid((radius_sq - dist_sq) * 10.0);
-    return alpha;
-}
 
-// Extract circle mask from rendered pixel color (differentiable)
-[Differentiable]
-float extractCircleMaskValue(float red, float green, float blue) {
-    float red_strength = sigmoid((red - 0.5) * 20.0);
-    float green_penalty = sigmoid((0.5 - green) * 20.0);
-    float blue_penalty = sigmoid((0.5 - blue) * 20.0);
-    return red_strength * green_penalty * blue_penalty;
+    // Distance to the centre, NOT squared distance. With squared distance the
+    // width of the transition shrinks as 1/(2r), so it falls below one pixel
+    // as soon as the circle is of any size and the gradient stops being
+    // measurable. The epsilon keeps d(sqrt)/dx finite at the exact centre.
+    float dist = sqrt(dx * dx + dy * dy + 1e-8);
+
+    // Smooth circle edge using sigmoid: positive inside, negative outside.
+    float alpha = sigmoid((circle_radius - dist) * EDGE_SHARPNESS);
+    return alpha;
 }
 
 // MAIN DIFFERENTIABLE FUNCTION: Compute loss from circle parameters
@@ -285,11 +202,7 @@ float computeCircleLossDifferentiable(
             // Render at this pixel
             float alpha = renderCircleAtPixel(float(x), float(y), circle_x, circle_y, circle_radius);
             
-            // Convert alpha to mask value (simulating red circle)
-            float red = 1.0;
-            float green = 1.0 - alpha;
-            float blue = 1.0 - alpha;
-            float rendered_mask_val = extractCircleMaskValue(red, green, blue);
+            float rendered_mask_val = alpha;
             
             // Accumulate statistics
             rendered_sum += rendered_mask_val;
@@ -334,26 +247,20 @@ float computeLossFromStatistics(
     // Step 1: Compute distance loss (always needed)
     float distance_loss = computeDistanceLoss(target_cx, target_cy, rendered_cx, rendered_cy, image_size);
     
-    // Step 2: Compute size loss components (inlined for better autodiff)
-    const float PI = 3.14159;
-    float target_radius_estimate = sqrt(target_pixels / PI);
-    float rendered_radius_estimate = sqrt(rendered_pixels / PI);
-    
-    float min_pixels = min(target_pixels, rendered_pixels);
-    float max_pixels = max(target_pixels, rendered_pixels);
-    float size_ratio = (max_pixels > 0) ? (min_pixels / max_pixels) : 1.0;
-    float size_penalty = 1.0 - size_ratio;
-    
-    float radius_diff = target_radius_estimate - rendered_radius_estimate;
-    float radius_growth_incentive = max(0.0, radius_diff) / float(image_size.x);
-    
+    // Step 2: Compute size loss components (single definition)
+    SizeLossResult size = computeSizeLoss(target_pixels, rendered_pixels, image_size);
+    float size_penalty = size.size_penalty;
+    float radius_growth_incentive = size.radius_growth_incentive;
+
     // Step 3: Compute total loss with conditional logic
     float total_loss;
     
     if (union_pixels > 0) {
         if (intersection_pixels < 1.0) {
-            // No overlap: use distance loss
-            total_loss = distance_loss + 0.5 * size_penalty;
+            // No overlap: use distance loss.
+            // The +1.0 puts this branch above the overlap branch, whose
+            // iou_loss can never exceed 1.0. 
+            total_loss = 1.0 + distance_loss + 0.5 * size_penalty;
         } else {
             // Has overlap: use IoU loss
             float iou = intersection_pixels / union_pixels;
@@ -366,117 +273,6 @@ float computeLossFromStatistics(
     }
     
     return total_loss;
-}
-
-// ============================================================================
-// Step 3B.6 Original: Non-Differentiable Version (for testing/comparison)
-// ============================================================================
-
-// Complete loss result structure
-struct CompleteLossResult {
-    // Mask statistics
-    float intersection_pixels;
-    float union_pixels;
-    float target_pixels;
-    float rendered_pixels;
-    
-    // IoU components
-    float iou;
-    float iou_loss;
-    
-    // Distance components
-    float target_cx;
-    float target_cy;
-    float rendered_cx;
-    float rendered_cy;
-    float centroid_distance;
-    float distance_loss;
-    
-    // Size components
-    float target_radius_estimate;
-    float rendered_radius_estimate;
-    float size_ratio;
-    float size_penalty;
-    float radius_growth_incentive;
-    
-    // Final loss
-    float total_loss;
-    bool used_distance_loss;  // true if intersection < 1.0
-};
-
-// Compute complete loss matching circle_focused_learning.py exactly
-// This combines all loss components with the same conditional logic
-CompleteLossResult computeCompleteLoss(
-    RWStructuredBuffer<float> target_mask,
-    RWStructuredBuffer<float> rendered_mask,
-    uint2 image_size
-) {
-    CompleteLossResult result;
-    
-    // Step 1: Compute IoU and pixel counts
-    IoUResult iou_result = computeIoU(target_mask, rendered_mask, image_size);
-    result.intersection_pixels = iou_result.intersection_pixels;
-    result.union_pixels = iou_result.union_pixels;
-    result.target_pixels = iou_result.target_pixels;
-    result.rendered_pixels = iou_result.rendered_pixels;
-    result.iou = iou_result.iou;
-    result.iou_loss = iou_result.iou_loss;
-    
-    // Step 2: Compute centroids and distance loss
-    float target_cx, target_cy;
-    computeImageCentroid(target_mask, image_size, target_cx, target_cy);
-    result.target_cx = target_cx;
-    result.target_cy = target_cy;
-    
-    float rendered_cx, rendered_cy;
-    computeImageCentroid(rendered_mask, image_size, rendered_cx, rendered_cy);
-    result.rendered_cx = rendered_cx;
-    result.rendered_cy = rendered_cy;
-    
-    float dx = target_cx - rendered_cx;
-    float dy = target_cy - rendered_cy;
-    result.centroid_distance = sqrt(dx * dx + dy * dy);
-    result.distance_loss = result.centroid_distance / image_size.x;
-    
-    // Step 3: Compute size loss components
-    SizeLossResult size_result = computeSizeLoss(result.target_pixels, result.rendered_pixels, image_size);
-    result.target_radius_estimate = size_result.target_radius_estimate;
-    result.rendered_radius_estimate = size_result.rendered_radius_estimate;
-    result.size_ratio = size_result.size_ratio;
-    result.size_penalty = size_result.size_penalty;
-    result.radius_growth_incentive = size_result.radius_growth_incentive;
-    
-    // Step 4: Compute total loss with conditional logic
-    // Matches PyTorch exactly:
-    // if union_pixels > 0:
-    //     if intersection_pixels < 1.0:
-    //         total_loss = distance_loss + 0.5 * size_penalty + 0.3 * radius_growth_incentive
-    //     else:
-    //         total_loss = iou_loss + 0.5 * size_penalty + 0.3 * radius_growth_incentive
-    // else:
-    //     total_loss = distance_loss + 1.0
-    
-    if (result.union_pixels > 0) {
-        if (result.intersection_pixels < 1.0) {
-            // No overlap: use distance loss
-            result.total_loss = result.distance_loss + 
-                              0.5 * result.size_penalty + 
-                              0.3 * result.radius_growth_incentive;
-            result.used_distance_loss = true;
-        } else {
-            // Has overlap: use IoU loss
-            result.total_loss = result.iou_loss + 
-                              0.5 * result.size_penalty + 
-                              0.3 * result.radius_growth_incentive;
-            result.used_distance_loss = false;
-        }
-    } else {
-        // No circles at all: high penalty + distance loss
-        result.total_loss = result.distance_loss + 1.0;
-        result.used_distance_loss = true;
-    }
-    
-    return result;
 }
 
 // ============================================================================
@@ -505,7 +301,7 @@ void extractMaskShader(
     float green = input_image[img_idx + 1];
     float blue = input_image[img_idx + 2];
     
-    output_mask[idx] = extractCircleMaskAtPixel(red, green, blue);
+    output_mask[idx] = extractCircleMaskValue(red, green, blue);
 }
 
 // Compute shader for testing centroid computation
@@ -523,113 +319,12 @@ void computeCentroidShader(
     output_centroid[1] = cy;
 }
 
-// Compute shader for testing IoU computation
-[shader("compute")]
-[numthreads(1, 1, 1)]
-void computeIoUShader(
-    uniform uint2 image_size,
-    RWStructuredBuffer<float> target_mask,
-    RWStructuredBuffer<float> rendered_mask,
-    RWStructuredBuffer<float> output_iou  // [intersection, union, target_pixels, rendered_pixels, iou, iou_loss]
-) {
-    IoUResult result = computeIoU(target_mask, rendered_mask, image_size);
-    
-    output_iou[0] = result.intersection_pixels;
-    output_iou[1] = result.union_pixels;
-    output_iou[2] = result.target_pixels;
-    output_iou[3] = result.rendered_pixels;
-    output_iou[4] = result.iou;
-    output_iou[5] = result.iou_loss;
-}
-
-// Compute shader for testing distance loss computation
-[shader("compute")]
-[numthreads(1, 1, 1)]
-void computeDistanceLossShader(
-    uniform uint2 image_size,
-    RWStructuredBuffer<float> target_mask,
-    RWStructuredBuffer<float> rendered_mask,
-    RWStructuredBuffer<float> output_distance  // [target_cx, target_cy, rendered_cx, rendered_cy, centroid_distance, distance_loss]
-) {
-    // Compute centroids
-    float target_cx, target_cy;
-    computeImageCentroid(target_mask, image_size, target_cx, target_cy);
-    
-    float rendered_cx, rendered_cy;
-    computeImageCentroid(rendered_mask, image_size, rendered_cx, rendered_cy);
-    
-    // Compute distance loss
-    float distance_loss = computeDistanceLoss(target_cx, target_cy, rendered_cx, rendered_cy, image_size);
-    
-    // Compute raw centroid distance for verification
-    float dx = target_cx - rendered_cx;
-    float dy = target_cy - rendered_cy;
-    float centroid_distance = sqrt(dx * dx + dy * dy);
-    
-    // Output results
-    output_distance[0] = target_cx;
-    output_distance[1] = target_cy;
-    output_distance[2] = rendered_cx;
-    output_distance[3] = rendered_cy;
-    output_distance[4] = centroid_distance;
-    output_distance[5] = distance_loss;
-}
-
-// Compute shader for testing size loss computation
-[shader("compute")]
-[numthreads(1, 1, 1)]
-void computeSizeLossShader(
-    uniform uint2 image_size,
-    RWStructuredBuffer<float> target_mask,
-    RWStructuredBuffer<float> rendered_mask,
-    RWStructuredBuffer<float> output_size  // [target_pixels, rendered_pixels, target_radius, rendered_radius, size_ratio, size_penalty, radius_growth_incentive]
-) {
-    // First compute IoU to get pixel counts
-    IoUResult iou_result = computeIoU(target_mask, rendered_mask, image_size);
-    
-    // Compute size loss
-    SizeLossResult size_result = computeSizeLoss(iou_result.target_pixels, iou_result.rendered_pixels, image_size);
-    
-    // Output results
-    output_size[0] = iou_result.target_pixels;
-    output_size[1] = iou_result.rendered_pixels;
-    output_size[2] = size_result.target_radius_estimate;
-    output_size[3] = size_result.rendered_radius_estimate;
-    output_size[4] = size_result.size_ratio;
-    output_size[5] = size_result.size_penalty;
-    output_size[6] = size_result.radius_growth_incentive;
-}
-
-// Compute shader for complete loss computation (Step 3B.6 - Original Non-Differentiable)
-[shader("compute")]
-[numthreads(1, 1, 1)]
-void computeCompleteLossShader(
-    uniform uint2 image_size,
-    RWStructuredBuffer<float> target_mask,
-    RWStructuredBuffer<float> rendered_mask,
-    RWStructuredBuffer<float> output_loss  // [total_loss, iou_loss, distance_loss, size_penalty, radius_growth_incentive, intersection_pixels, used_distance_loss]
-) {
-    // Compute complete loss
-    CompleteLossResult result = computeCompleteLoss(target_mask, rendered_mask, image_size);
-    
-    // Output main results
-    output_loss[0] = result.total_loss;
-    output_loss[1] = result.iou_loss;
-    output_loss[2] = result.distance_loss;
-    output_loss[3] = result.size_penalty;
-    output_loss[4] = result.radius_growth_incentive;
-    output_loss[5] = result.intersection_pixels;
-    output_loss[6] = result.used_distance_loss ? 1.0 : 0.0;
-}
-
 // ============================================================================
 // AUTODIFF: Compute Gradients using Slang's bwd_diff
 // ============================================================================
 
 // Compute gradients of loss w.r.t. circle parameters using autodiff
 // This is the main training shader!
-// Uses BACKWARD-mode autodiff (bwd_diff) to match PyTorch's loss.backward()
-// This is MORE EFFICIENT: 1 backward pass gets all 3 gradients!
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void computeGradientsAutodiff(
@@ -669,16 +364,12 @@ void computeGradientsAutodiff(
     output_grads[3] = dp_r.d;    
 }
 
+// Thin adapter so the displayed image and the optimized mask can never drift
+// apart: both go through renderCircleAtPixel, which is the single definition
+// of the circle's shape.
 float renderCircle(float2 coord, CircleParams circle) {
-    float2 center = float2(circle.x, circle.y);
-    float dx = coord.x - center.x;
-    float dy = coord.y - center.y;
-    float dist_sq = dx * dx + dy * dy;
-    float radius_sq = circle.radius * circle.radius + 1e-6;
-    
-    // Use sigmoid function (matches image_based_loss.slang renderCircleAtPixel)
-    float alpha = sigmoid((radius_sq - dist_sq) * 10.0);
-    return alpha;
+    return renderCircleAtPixel(coord.x, coord.y,
+                               circle.x, circle.y, circle.radius);
 }
 
 struct CircleParams {
