@@ -69,7 +69,7 @@ class MatchTargetImage:
         
         image = np.ones((self.image_size, self.image_size, 3), dtype=np.float32)
         
-        center_x, center_y = 1*(self.image_size // 2), 1*(self.image_size // 2)
+        center_x, center_y = 1*(3* self.image_size // 4), 1*(3 * self.image_size // 4)
         radius = 15
         color = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         
@@ -263,20 +263,38 @@ class MatchTargetImage:
         return x_accuracy, y_accuracy, r_accuracy
     
     def extract_circle_mask_from_image(self, image):
-        """Extract circle mask from RGB image (matches PyTorch version)."""
-        red_channel = image[:, :, 0]
-        green_channel = image[:, :, 1]
-        blue_channel = image[:, :, 2]
-        
-        def sigmoid_np(x):
-            return 1.0 / (1.0 + np.exp(-x))
-        
-        red_strength = sigmoid_np((red_channel - 0.5) * 20.0)
-        green_penalty = sigmoid_np((0.5 - green_channel) * 20.0)
-        blue_penalty = sigmoid_np((0.5 - blue_channel) * 20.0)
-        
-        circle_mask = red_strength * green_penalty * blue_penalty
-        return circle_mask
+        """Extract circle mask from an RGB image.
+
+        Runs the same extractMaskShader the target statistics use, rather than
+        reimplementing extractCircleMaskValue in numpy, so the debug masks can
+        never drift away from what the loss actually sees.
+        """
+        rgba = np.concatenate(
+            [image, np.ones((self.image_size, self.image_size, 1), dtype=np.float32)],
+            axis=2
+        ).astype(np.float32).flatten()
+
+        image_buffer = self.device.create_buffer(
+            element_count=len(rgba),
+            struct_size=4,
+            usage=spy.BufferUsage.unordered_access | spy.BufferUsage.shader_resource,
+            data=rgba
+        )
+        mask_buffer = self.device.create_buffer(
+            element_count=self.image_size * self.image_size,
+            struct_size=4,
+            usage=spy.BufferUsage.unordered_access
+        )
+
+        self.mask_extraction_kernel.dispatch(
+            thread_count=[self.image_size, self.image_size, 1],
+            image_size=(self.image_size, self.image_size),
+            input_image=image_buffer,
+            output_mask=mask_buffer
+        )
+
+        return mask_buffer.to_numpy().view(np.float32).reshape(
+            self.image_size, self.image_size)
     
     def create_debug_visualization(self, iteration, rendered_buffer):
         """Create comprehensive debug visualization (matches PyTorch version)."""
@@ -390,9 +408,9 @@ class MatchTargetImage:
 
                 x_acc, y_acc, r_acc = self.print_comparison()
 
-                # Check for early stopping
-                if x_acc >= 92 and y_acc >= 92 and r_acc >= 92:
-                    print(f"\n EARLY STOPPING: All parameters achieved 92%+ accuracy! Iteration {iteration}")
+                # Check for early stopping.
+                if x_acc >= 98 and y_acc >= 98 and r_acc >= 98:
+                    print(f"\n EARLY STOPPING: All parameters achieved 98%+ accuracy! Iteration {iteration}")
                     print(f"   Stopped at iteration {iteration} (saved {num_iterations - iteration - 1} iterations)")
                     break                    
         
