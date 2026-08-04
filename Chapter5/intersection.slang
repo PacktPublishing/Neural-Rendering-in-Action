@@ -1,7 +1,7 @@
 import common;
 import slangpy;
 
-// Moller-Trumbore ray-triangle intersection.
+// Moeller-Trumbore ray-triangle intersection.
 // Returns true if the ray hits the triangle, writing t and barycentric coords.
 [Differentiable]
 bool rayTriangleIntersect(
