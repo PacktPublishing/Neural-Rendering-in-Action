@@ -1,0 +1,17 @@
+// Auto-generated from nrc_slang_paths.cpp.in at CMake-configure time.
+// Do not edit the generated file; edit the .in template instead.
+
+#include "nrc/nrc_slang_paths.h"
+
+namespace nrc {
+
+const char* const* slangIncludePaths(size_t* count) {
+    static const char* paths[] = {
+        R"(@CMAKE_CURRENT_SOURCE_DIR@/shaders)",
+        R"(@RTXNS_ROOT@/src/NeuralShading_Shaders)",
+    };
+    *count = sizeof(paths) / sizeof(paths[0]);
+    return paths;
+}
+
+}  // namespace nrc
