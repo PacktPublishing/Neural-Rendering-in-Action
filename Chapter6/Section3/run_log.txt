@@ -1,0 +1,83 @@
+display mode: headless (figures only)
+
+======================================================================
+Experiment 1: mesh -> occupancy grid -> mesh round trip
+======================================================================
+input mesh: 4608 vertices, 9216 triangles, 162.0 KiB
+  R=  8: voxelized in  0.02 s |     160/    512 voxels occupied |     0.5 KiB at 1 B/voxel
+  R= 16: voxelized in  0.08 s |    1320/   4096 voxels occupied |     4.0 KiB at 1 B/voxel
+  R= 32: voxelized in  0.31 s |   10392/  32768 voxels occupied |    32.0 KiB at 1 B/voxel
+  R= 64: voxelized in  1.23 s |   83992/ 262144 voxels occupied |   256.0 KiB at 1 B/voxel
+  [figure saved to figures/fig1_voxelization.png]
+  R=16: Euler characteristic = 0 (torus expects 0 -> genus preserved: True)
+  R=64: Euler characteristic = 0 (torus expects 0 -> genus preserved: True)
+
+======================================================================
+Experiment 2: memory vs. resolution
+======================================================================
+  mesh = 162 KiB | neural field = 85 KiB | 512^3 float grid = 0.50 GiB
+  [figure saved to figures/fig2_memory.png]
+
+======================================================================
+Experiment 3: trilinear interpolation: a continuous field from a grid
+======================================================================
+  65,536 continuous queries of the 32^3 grid in 11 ms (6.2 M queries/s)
+  gradient check: max |analytic - finite difference| = 2.76e-10
+  [figure saved to figures/fig3_trilinear.png]
+
+======================================================================
+Experiment 4: area-weighted surface sampling
+======================================================================
+  sampled   256 points in    1.5 ms (  3.0 KiB as float32)
+  sampled  1024 points in    1.6 ms ( 12.0 KiB as float32)
+  sampled  4096 points in    2.4 ms ( 48.0 KiB as float32)
+  [figure saved to figures/fig4_pointclouds.png]
+
+======================================================================
+Experiment 5: mini-PointNet vs. flattened MLP under point shuffling
+======================================================================
+dataset: 600 train / 180 test clouds, 128 points each, classes = ['sphere', 'torus', 'box']
+
+training TinyPointNet (shared MLP + max-pool):
+  epoch  10  loss 0.3143  train 0.982  test 0.972
+  epoch  20  loss 0.0889  train 1.000  test 0.994
+  epoch  30  loss 0.0249  train 1.000  test 0.989
+  epoch  40  loss 0.0128  train 1.000  test 0.989
+
+training FlatMLP (flatten to 3N vector):
+  epoch  10  loss 0.0020  train 1.000  test 1.000
+  epoch  20  loss 0.0005  train 1.000  test 1.000
+  epoch  30  loss 0.0002  train 1.000  test 1.000
+  epoch  40  loss 0.0001  train 1.000  test 1.000
+
+  PointNet: 17,027 params, trained in 27.2 s | FlatMLP: 57,731 params, trained in 0.9 s
+  PointNet / ordered    : 0.989
+  PointNet / shuffled   : 0.989
+  FlatMLP / ordered     : 1.000
+  FlatMLP / shuffled    : 0.428
+  max |logit change| under shuffling: PointNet 0.00e+00 | FlatMLP 1.16e+01
+  [figure saved to figures/fig5_pointnet.png]
+
+======================================================================
+Experiment 6: classical vs. neural representations of the same shape
+======================================================================
+training the neural occupancy field (MLP memorizes the torus from labeled random points):
+  step  1000  loss 0.0190  batch acc 0.993  (12.7 s)
+  step  2000  loss 0.0149  batch acc 0.994  (25.2 s)
+  step  3000  loss 0.0100  batch acc 0.996  (37.9 s)
+  step  4000  loss 0.0105  batch acc 0.995  (50.5 s)
+  21,761 parameters (85.0 KiB), trained in 50.5 s
+
+  representation       build(s)  mem(KiB)  mesh(s)   verts   faces    IoU   Chamfer(x1e-3)
+  -----------------------------------------------------------------------------------------------
+  ground-truth mesh         0.0     162.0     0.00    4608    9216  1.000       0.00
+  voxel grid R=32           0.3      32.0     0.00    4992    9984  0.953      13.43
+  neural field @128^3      50.5      85.0     8.13   39910   79820  0.987      10.73
+
+  (build = voxelization or network training; mesh = marching-cubes extraction)
+  [figure saved to figures/fig6_side_by_side.png]
+  same network meshed at  32^3:   2304 verts in   0.1 s (memory unchanged: 85.0 KiB)
+  same network meshed at  64^3:  10178 verts in   1.0 s (memory unchanged: 85.0 KiB)
+  same network meshed at 128^3:  39910 verts in   8.2 s (memory unchanged: 85.0 KiB)
+
+All Section 3 experiments complete.
