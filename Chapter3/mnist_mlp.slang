@@ -142,13 +142,13 @@ public struct MNIST_MLP
     // Construct MLP from parameter buffer
     public __init(MNIST_MLP_Params* params)
     {
-        constexpr int layer1_total = (input_size * hidden1_size) + hidden1_size;
-        constexpr int layer2_total = (hidden1_size * hidden2_size) + hidden2_size;
+        const int layer1_total = (input_size * hidden1_size) + hidden1_size;
+        const int layer2_total = (hidden1_size * hidden2_size) + hidden2_size;
         
         // Layer 1: 784 → 128
         {
-            constexpr int weights_size = input_size * hidden1_size;
-            constexpr int biases_offset = weights_size;
+            const int weights_size = input_size * hidden1_size;
+            const int biases_offset = weights_size;
             
             m_layer1 = Layer<input_size, hidden1_size>(
                 params->m_params, 
@@ -160,8 +160,8 @@ public struct MNIST_MLP
         
         // Layer 2: 128 → 64
         {
-            constexpr int weights_size = hidden1_size * hidden2_size;
-            constexpr int biases_offset = layer1_total + weights_size;
+            const int weights_size = hidden1_size * hidden2_size;
+            const int biases_offset = layer1_total + weights_size;
             
             m_layer2 = Layer<hidden1_size, hidden2_size>(
                 params->m_params + layer1_total,
@@ -173,9 +173,9 @@ public struct MNIST_MLP
         
         // Layer 3: 64 → 10
         {
-            constexpr int prev_layers = layer1_total + layer2_total;
-            constexpr int weights_size = hidden2_size * output_size;
-            constexpr int biases_offset = prev_layers + weights_size;
+            const int prev_layers = layer1_total + layer2_total;
+            const int weights_size = hidden2_size * output_size;
+            const int biases_offset = prev_layers + weights_size;
             
             m_layer3 = Layer<hidden2_size, output_size>(
                 params->m_params + prev_layers,
@@ -298,12 +298,11 @@ public void updateParams(
 [Differentiable]
 internal float[output_size] softmax(float[output_size] logits)
 {
-    float[output_size] probs;
+    float[output_size] probs = {};
     
     // Find max for numerical stability (no_diff since it's just for numerical stability)
     float max_logit = no_diff logits[0];
 
-    [MaxIters(16)]  // output_size is 10 for MNIST
     for (int i = 1; i < output_size; i++) {
         if (no_diff logits[i] > max_logit) {
             max_logit = no_diff logits[i];
@@ -313,14 +312,12 @@ internal float[output_size] softmax(float[output_size] logits)
     // Compute exp and sum
     float sum = 0.0f;
 
-    [MaxIters(16)]  // output_size is 10 for MNIST
     for (int i = 0; i < output_size; i++) {
         probs[i] = exp(logits[i] - max_logit);
         sum += probs[i];
     }
     
     // Normalize
-    [MaxIters(16)]  // output_size is 10 for MNIST
     for (int i = 0; i < output_size; i++) {
         probs[i] /= sum;
     }
@@ -395,7 +392,6 @@ public int predictSample(
     int predicted_class = 0;
     float max_logit = logits[0];
     
-    [MaxIters(16)]  // output_size is 10 for MNIST
     for (int i = 1; i < output_size; i++) {
         if (logits[i] > max_logit) {
             max_logit = logits[i];
