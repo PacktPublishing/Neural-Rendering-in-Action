@@ -6,7 +6,7 @@
 
 // Sigmoid activation function (differentiable)
 // MUST be [Differentiable] because it's called inside renderCircleAtPixel,
-// which is called inside computeCircleLossDifferentiable.
+// which computeGradientsAutodiff differentiates.
 // Without this, gradient chain breaks: ∂loss/∂circle_x cannot be computed!
 [Differentiable]
 float sigmoid(float x) {
@@ -122,17 +122,28 @@ SizeLossResult computeSizeLoss(
     result.target_radius_estimate = sqrt(target_pixels / PI);
     result.rendered_radius_estimate = sqrt(rendered_pixels / PI);
     
-    // Size ratio (smaller / larger)
-    float min_pixels = min(target_pixels, rendered_pixels);
-    float max_pixels = max(target_pixels, rendered_pixels);
-    
-    result.size_ratio = (max_pixels > 0) ? (min_pixels / max_pixels) : 1.0;
+    // Size agreement, as a smooth symmetric ratio rather than min/max.
+    //   2*a*b / (a^2 + b^2)  is 1 exactly when a == b, falls off either side,
+    //   and is symmetric in a and b, so it behaves like min/max - but min/max
+    // has a corner precisely where the two counts are equal, which is where
+    // the optimizer is trying to come to rest. The corner makes dLoss/dradius
+    // jump sign across the solution and the radius chatters instead of
+    // settling. This form is differentiable there, with zero slope at the
+    // match, so the radius can actually land on it.
+    float sum_squares = target_pixels * target_pixels + rendered_pixels * rendered_pixels;
+    result.size_ratio = (sum_squares > 0) ? (2.0 * target_pixels * rendered_pixels / sum_squares) : 1.0;
+
+    // Equivalently (target - rendered)^2 / (target^2 + rendered^2).
     result.size_penalty = 1.0 - result.size_ratio;
-    
-    // Radius growth incentive (only if rendered is smaller than target)
-    // Use max(0, x) instead of if/else for better autodiff (equivalent to ReLU)
-    float radius_diff = result.target_radius_estimate - result.rendered_radius_estimate;
-    result.radius_growth_incentive = max(0.0, radius_diff) / image_size.x;
+
+    // Radius growth incentive (only if rendered is smaller than target).
+    // Squared ReLU, not plain max(0, x), for the same reason: t^2 has slope
+    // 2t, which is continuous through t == 0, whereas max(0, t) hands the
+    // radius a slope of 1 on one side and 0 on the other at the exact point
+    // the sizes agree. Normalized by image_size^2 to stay dimensionless.
+    float radius_diff = max(0.0, result.target_radius_estimate - result.rendered_radius_estimate);
+    result.radius_growth_incentive = (radius_diff * radius_diff)
+                                   / float(image_size.x * image_size.x);
     
     return result;
 }
@@ -154,7 +165,7 @@ static const float EDGE_SHARPNESS = 2.0;
 // Render circle at a single pixel (differentiable)
 // Returns alpha value [0, 1] for smooth circle rendering
 // MUST be [Differentiable] because:
-// 1. Called inside computeCircleLossDifferentiable
+// 1. computeGradientsAutodiff calls bwd_diff on it, once per pixel
 // 2. Takes circle_x, circle_y, circle_radius as parameters (the vars we optimize!)
 // 3. Without this, ∂loss/∂circle_x, ∂loss/∂circle_y, ∂loss/∂circle_radius cannot be computed
 [Differentiable]
@@ -173,65 +184,9 @@ float renderCircleAtPixel(no_diff float px, no_diff float py, float circle_x, fl
     return alpha;
 }
 
-// MAIN DIFFERENTIABLE FUNCTION: Compute loss from circle parameters
-// This function loops over pixels to compute statistics, then computes loss
-[Differentiable]
-float computeCircleLossDifferentiable(
-    float circle_x,              // ← We want gradients for these 3 parameters
-    float circle_y,
-    float circle_radius,
-    RWStructuredBuffer<float> target_mask,  // Pre-computed target mask (constant)
-    no_diff uint2 image_size,    // ← Constants: no_diff = don't compute gradients
-    no_diff float target_cx,     // ← Pre-computed target centroid (constant)
-    no_diff float target_cy,
-    no_diff float target_pixels  // ← Pre-computed target pixel count (constant)
-) {
-    // Step 1: Render circle and compute statistics
-    float rendered_sum = 0;
-    float rendered_cx_sum = 0;
-    float rendered_cy_sum = 0;
-    float intersection_sum = 0;
-    
-    // Loop over all pixels (forward pass only - Slang CAN differentiate through this!)
-    // [MaxIters] tells Slang the maximum iteration count for autodiff
-    // NOTE: Using smaller max to reduce GPU timeout risk
-    [MaxIters(128)]  // Support up to 64x64 images (larger causes GPU timeout)
-    for (uint y = 0; y < image_size.y; y++) {
-        [MaxIters(128)]
-        for (uint x = 0; x < image_size.x; x++) {
-            // Render at this pixel
-            float alpha = renderCircleAtPixel(float(x), float(y), circle_x, circle_y, circle_radius);
-            
-            float rendered_mask_val = alpha;
-            
-            // Accumulate statistics
-            rendered_sum += rendered_mask_val;
-            rendered_cx_sum += x * rendered_mask_val;
-            rendered_cy_sum += y * rendered_mask_val;
-            
-            // Compute intersection with target
-            uint idx = y * image_size.x + x;
-            intersection_sum += target_mask[idx] * rendered_mask_val;
-        }
-    }
-    
-    // Step 2: Compute rendered centroid
-    float rendered_cx = (rendered_sum > 0) ? (rendered_cx_sum / rendered_sum) : (image_size.x / 2.0);
-    float rendered_cy = (rendered_sum > 0) ? (rendered_cy_sum / rendered_sum) : (image_size.y / 2.0);
-    
-    // Step 3: Compute union
-    float union_sum = target_pixels + rendered_sum - intersection_sum;
-    
-    // Step 4: Use our differentiable loss formula
-    return computeLossFromStatistics(
-        intersection_sum, union_sum, target_pixels, rendered_sum,
-        target_cx, target_cy, rendered_cx, rendered_cy,
-        image_size
-    );
-}
-
-// Differentiable loss formula (takes pre-computed statistics)
-// This is used by the main differentiable function above
+// Differentiable loss formula, in terms of image statistics rather than pixels.
+// computeGradientsAutodiff differentiates this to get dLoss/d(statistics), then
+// pushes those derivatives back to the circle parameters one pixel at a time.
 [Differentiable]
 float computeLossFromStatistics(
     float intersection_pixels,
@@ -325,6 +280,11 @@ void computeCentroidShader(
 
 // Compute gradients of loss w.r.t. circle parameters using autodiff
 // This is the main training shader!
+//
+// Differentiating in two phases costs one hand-written chain rule:
+//   phase 1  - accumulate image statistics with no autodiff at all
+//   phase 2a - bwd_diff the *statistics* -> dLoss/d{I, U, R, rcx, rcy}
+//   phase 2b - bwd_diff one pixel at a time, seeded with dLoss/dalpha_i
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void computeGradientsAutodiff(
@@ -336,32 +296,88 @@ void computeGradientsAutodiff(
     uniform float target_cy,
     uniform float target_pixels,
     RWStructuredBuffer<float> target_mask,
-    RWStructuredBuffer<float> output_grads  // [loss, grad_x, grad_y, grad_radius, rendered_sum, intersection_sum, iou, size_penalty, radius_growth]
+    RWStructuredBuffer<float> output_grads  // [loss, grad_x, grad_y, grad_radius]
 ) {
-    // Create differential pairs
-    var dp_x = diffPair(circle_x);
-    var dp_y = diffPair(circle_y);
-    var dp_r = diffPair(circle_radius);
-    
-    // Forward pass: compute loss
-    float loss = computeCircleLossDifferentiable(
-        circle_x, circle_y, circle_radius,
-        target_mask, image_size,
-        target_cx, target_cy, target_pixels
+    // ---- Phase 1: forward statistics (plain code, no autodiff) ----
+    float rendered_sum = 0;
+    float cx_sum = 0;
+    float cy_sum = 0;
+    float intersection_sum = 0;
+
+    for (uint y = 0; y < image_size.y; y++) {
+        for (uint x = 0; x < image_size.x; x++) {
+            float alpha = renderCircleAtPixel(float(x), float(y), circle_x, circle_y, circle_radius);
+
+            rendered_sum += alpha;
+            cx_sum += x * alpha;
+            cy_sum += y * alpha;
+            intersection_sum += target_mask[y * image_size.x + x] * alpha;
+        }
+    }
+
+    float rendered_cx = (rendered_sum > 0) ? (cx_sum / rendered_sum) : (image_size.x / 2.0);
+    float rendered_cy = (rendered_sum > 0) ? (cy_sum / rendered_sum) : (image_size.y / 2.0);
+    float union_sum = target_pixels + rendered_sum - intersection_sum;
+
+    float loss = computeLossFromStatistics(
+        intersection_sum, union_sum, target_pixels, rendered_sum,
+        target_cx, target_cy, rendered_cx, rendered_cy,
+        image_size
     );
-    
-    // Backward pass
-    bwd_diff(computeCircleLossDifferentiable)(
-        dp_x, dp_y, dp_r,                      // Parameters to differentiate (diffPairs)
-        target_mask, image_size,                // Buffers and constants (regular types)
-        target_cx, target_cy, target_pixels,    // no_diff constants (regular floats)
-        1.0  // Seed gradient: ∂loss/∂loss = 1.0
+
+    // ---- Phase 2a: dLoss/d(statistics) ----
+    var dp_I = diffPair(intersection_sum);
+    var dp_U = diffPair(union_sum);
+    var dp_R = diffPair(rendered_sum);
+    var dp_cx = diffPair(rendered_cx);
+    var dp_cy = diffPair(rendered_cy);
+
+    bwd_diff(computeLossFromStatistics)(
+        dp_I, dp_U, target_pixels, dp_R,
+        target_cx, target_cy, dp_cx, dp_cy,
+        image_size,
+        1.0  // Seed gradient: dloss/dloss = 1.0
     );
-    
+
+    // ---- Phase 2b: dLoss/d(circle params), one differentiated pixel at a time ----
+    // Chain rule from the statistics down to each pixel's alpha:
+    //   dI/dalpha_i   = mask_i
+    //   dU/dalpha_i   = 1 - mask_i      (U = target_pixels + R - I)
+    //   dR/dalpha_i   = 1
+    //   drcx/dalpha_i = (x_i - rcx) / R (rcx = sum(x*alpha) / R, quotient rule)
+    //   drcy/dalpha_i = (y_i - rcy) / R
+    float inv_R = (rendered_sum > 0) ? (1.0 / rendered_sum) : 0.0;
+
+    float grad_x = 0;
+    float grad_y = 0;
+    float grad_r = 0;
+
+    for (uint y = 0; y < image_size.y; y++) {
+        for (uint x = 0; x < image_size.x; x++) {
+            float m = target_mask[y * image_size.x + x];
+
+            float dLoss_dAlpha = dp_I.d * m
+                               + dp_U.d * (1.0 - m)
+                               + dp_R.d
+                               + dp_cx.d * (float(x) - rendered_cx) * inv_R
+                               + dp_cy.d * (float(y) - rendered_cy) * inv_R;
+
+            var dp_x = diffPair(circle_x);
+            var dp_y = diffPair(circle_y);
+            var dp_r = diffPair(circle_radius);
+
+            bwd_diff(renderCircleAtPixel)(float(x), float(y), dp_x, dp_y, dp_r, dLoss_dAlpha);
+
+            grad_x += dp_x.d;
+            grad_y += dp_y.d;
+            grad_r += dp_r.d;
+        }
+    }
+
     output_grads[0] = loss;
-    output_grads[1] = dp_x.d;
-    output_grads[2] = dp_y.d;
-    output_grads[3] = dp_r.d;    
+    output_grads[1] = grad_x;
+    output_grads[2] = grad_y;
+    output_grads[3] = grad_r;
 }
 
 // Thin adapter so the displayed image and the optimized mask can never drift

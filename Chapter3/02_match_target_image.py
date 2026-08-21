@@ -76,7 +76,6 @@ class MatchTargetImage:
         self.target_center_x = float(center_x)
         self.target_center_y = float(center_y)
         self.target_radius = float(radius)
-        self.target_color = color
         
         y_coords, x_coords = np.meshgrid(
             np.arange(self.image_size, dtype=np.float32),
@@ -144,14 +143,11 @@ class MatchTargetImage:
         
         self.target_mask_buffer = mask_buffer 
         
-        self.target_cx = float(self.target_center_x)
-        self.target_cy = float(self.target_center_y)
+        self.target_cx = float(centroid_data[0])
+        self.target_cy = float(centroid_data[1])
         self.target_pixels = float(np.sum(target_mask_data))
         
-        computed_cx = float(centroid_data[0])
-        computed_cy = float(centroid_data[1])
-        print(f"Target statistics: cx={self.target_cx:.1f}, cy={self.target_cy:.1f}, pixels={self.target_pixels:.1f}")
-        print(f"  (Computed centroid was cx={computed_cx:.6f}, cy={computed_cy:.6f} - using true values instead)")
+        print(f"Target statistics: cx={self.target_cx:.4f}, cy={self.target_cy:.4f}, pixels={self.target_pixels:.1f}")
     
     def initialize_parameters(self):
         # random initialization
@@ -379,12 +375,7 @@ class MatchTargetImage:
     def train(self, num_iterations=1700, learning_rate=0.5, momentum=0.9):
         print(f"Training for {num_iterations} iterations")
         losses = []
-            
-        # Create debug visualization every 20 iterations
-        debug_intervals = list(range(0, num_iterations, 20))
-        if num_iterations - 1 not in debug_intervals:
-            debug_intervals.append(num_iterations - 1)
-        
+
         for iteration in range(num_iterations):
             # Compute gradients using Slang autodiff
             result = self.compute_autodiff_gradients(self.current_params)
@@ -399,12 +390,11 @@ class MatchTargetImage:
                 print(f"  Gradients: dx={result['dx']:.6f}, dy={result['dy']:.6f}, dr={result['dr']:.6f}")            
 
                 # Create debug visualization
-                if iteration in debug_intervals:
-                    rendered_buffer = self.render_circle(self.current_params)
-                    print(f"  Creating debug visualization...")
-                    debug_path = self.create_debug_visualization(iteration, rendered_buffer)
-                    abs_debug_path = os.path.abspath(debug_path)
-                    print(f"  Saved debug visualization: {abs_debug_path}")
+                rendered_buffer = self.render_circle(self.current_params)
+                print(f"  Creating debug visualization...")
+                debug_path = self.create_debug_visualization(iteration, rendered_buffer)
+                abs_debug_path = os.path.abspath(debug_path)
+                print(f"  Saved debug visualization: {abs_debug_path}")
 
                 x_acc, y_acc, r_acc = self.print_comparison()
 
