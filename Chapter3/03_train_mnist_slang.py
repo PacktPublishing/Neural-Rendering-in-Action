@@ -65,9 +65,9 @@ def initialize_params(device):
     params_data = np.ascontiguousarray(params_data, dtype=np.float32)
     
     # Create buffers
-    params = spy.NDBuffer.from_numpy(device, params_data)
+    params = spy.Tensor.from_numpy(device, params_data)
     params_grad_data = np.zeros_like(params_data)
-    params_grad = spy.NDBuffer.from_numpy(device, params_grad_data)
+    params_grad = spy.Tensor.from_numpy(device, params_grad_data)
     
     print(f"Initialized {total_params:,} parameters")
     return params, params_grad
@@ -79,10 +79,10 @@ def create_mlp_params(device, params, params_grad):
     if module is None:
         module = spy.Module.load_from_file(device, "mnist_mlp.slang")
     
-    mlp_params = spy.NDBuffer(
-        device, 
-        dtype=module.MNIST_MLP_Params, 
-        shape=(1,)
+    mlp_params = spy.Tensor.empty(
+        device,
+        shape=(1,),
+        dtype=module.MNIST_MLP_Params
     )
     
     cursor = mlp_params.cursor()
@@ -306,7 +306,7 @@ def load_model(device, filepath='mnist_slang_model.npz'):
         raise ValueError(f"Model shape mismatch! Expected {expected_shape}, got {shape}")
     
     # Create Slang buffer from numpy array
-    params = spy.NDBuffer.from_numpy(device, params_np)
+    params = spy.Tensor.from_numpy(device, params_np)
     
     print(f"Model loaded from {filepath}")
     return params
@@ -422,10 +422,10 @@ def main():
     # Initialize Adam optimizer state
     print("Initializing Adam optimizer...")
     total_params = get_total_params()
-    adam_state = spy.NDBuffer(
-        device, 
-        dtype=module.AdamState, 
-        shape=(total_params,)
+    adam_state = spy.Tensor.empty(
+        device,
+        shape=(total_params,),
+        dtype=module.AdamState
     )
     module.clearAdamState(adam_state)
     
