@@ -328,9 +328,9 @@ internal float[output_size] softmax(float[output_size] logits)
 // Cross-entropy loss (differentiable)
 [Differentiable]
 internal float cross_entropy_loss(
-    Ref<MNIST_MLP> mlp, 
+    inout MNIST_MLP mlp, 
     float[input_size] input, 
-    no_diff int target_label  // target_label is constant, no gradients needed
+    int target_label  // target_label is constant, no gradients needed
 )
 {
     // Forward pass
