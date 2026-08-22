@@ -79,7 +79,7 @@ void computeImageCentroid(
 float computeDistanceLoss(
     no_diff float target_cx, no_diff float target_cy,  // ← Target centroid is constant
     float rendered_cx, float rendered_cy,               // ← Rendered centroid depends on circle params
-    no_diff uint2 image_size                            // ← Image size is constant
+    uint2 image_size                            // ← Image size is constant
 ) {
     float dx = target_cx - rendered_cx;
     float dy = target_cy - rendered_cy;
@@ -113,7 +113,7 @@ struct SizeLossResult : IDifferentiable {
 SizeLossResult computeSizeLoss(
     no_diff float target_pixels,     // ← Target pixel count is constant
     float rendered_pixels,            // ← Rendered pixel count depends on circle params
-    no_diff uint2 image_size          // ← Image size is constant
+    uint2 image_size          // ← Image size is constant
 ) {
     SizeLossResult result;
     
@@ -197,7 +197,7 @@ float computeLossFromStatistics(
     no_diff float target_cy,
     float rendered_cx,               // ← Variables: rendered centroid depends on circle params
     float rendered_cy,
-    no_diff uint2 image_size         // ← Constant: image size never changes
+    uint2 image_size         // ← Constant: image size never changes
 ) {
     // Step 1: Compute distance loss (always needed)
     float distance_loss = computeDistanceLoss(target_cx, target_cy, rendered_cx, rendered_cy, image_size);
