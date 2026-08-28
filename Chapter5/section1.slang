@@ -18,7 +18,7 @@ float3 shadeTriangleHit(
     no_diff Ray ray,
     Material material,
     PointLight lights[2],
-    no_diff int numLights,
+    int numLights,
     no_diff float3 camPos)
 {
     float t;
@@ -53,11 +53,11 @@ float pixelLossMat(
     Material material,
     no_diff Material targetMaterial,
     PointLight lights[2],
-    no_diff int numLights,
+    int numLights,
     no_diff float3 camPos)
 {
     float3 rendered = shadeTriangleHit(v0, v1, v2, ray, material, lights, numLights, camPos);
-    float3 target = shadeTriangleHit(v0, v1, v2, ray, targetMaterial, lights, numLights, camPos);
+    float3 target = detach(shadeTriangleHit(v0, v1, v2, ray, targetMaterial, lights, numLights, camPos));
     float3 diff = rendered - target;
     return dot(diff, diff);
 }
@@ -137,7 +137,7 @@ void computeAlbedoGradients(
         camera.position,
         1.0f);
 
-    albedoGrad.set({0}, dMat.d.albedo);
+    albedoGrad.add({0}, dMat.d.albedo);
 }
 
 // ============================================================================
@@ -161,7 +161,7 @@ float4 renderSideBySide(
         int2 tc = int2(
             clamp(int(u * imageRes.x), 0, int(imageRes.x) - 1),
             clamp(int(v_coord * imageRes.y), 0, int(imageRes.y) - 1));
-        return leftImage.get({tc.x, tc.y});
+        return leftImage.load(tc);
     }
     else
     {
@@ -170,7 +170,7 @@ float4 renderSideBySide(
         int2 tc = int2(
             clamp(int(u * imageRes.x), 0, int(imageRes.x) - 1),
             clamp(int(v_coord * imageRes.y), 0, int(imageRes.y) - 1));
-        return rightImage.get({tc.x, tc.y});
+        return rightImage.load(tc);
     }
 }
 
