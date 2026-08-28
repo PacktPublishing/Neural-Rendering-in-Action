@@ -44,7 +44,7 @@ float3 shadeHit(
     HitInfo hit,
     Material mat,
     PointLight lights[2],
-    no_diff int numLights,
+    int numLights,
     float3 viewDir)
 {
     float3 color = float3(0.0f);

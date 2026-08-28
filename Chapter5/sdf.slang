@@ -114,10 +114,10 @@ float sphereTrace(Ray ray, SDFSceneParams params)
         float3 p = ray.origin + ray.direction * t;
         float d = evalScene(p, params);
 
-        if (no_diff (d < TRACE_HIT_EPS))
+        if (detach(d) < TRACE_HIT_EPS)
             return t;
 
-        if (no_diff (t > TRACE_MAX_DIST))
+        if (detach(t) > TRACE_MAX_DIST)
             return -1.0f;
 
         t = t + d;
@@ -183,10 +183,10 @@ float sdfSampleLoss(
 //         [2]={boxHalfExtents.yz, torusCenter.xy}  [3]={torusCenter.z, torusRadii, smoothK}
 void packSDFGradients(SDFSceneParams.Differential d, AtomicTensor<float4, 1> grad)
 {
-    grad.set({0}, float4(d.sphereCenter, d.sphereRadius));
-    grad.set({1}, float4(d.boxCenter, d.boxHalfExtents.x));
-    grad.set({2}, float4(d.boxHalfExtents.y, d.boxHalfExtents.z, d.torusCenter.x, d.torusCenter.y));
-    grad.set({3}, float4(d.torusCenter.z, d.torusRadii.x, d.torusRadii.y, d.smoothK));
+    grad.add({0}, float4(d.sphereCenter, d.sphereRadius));
+    grad.add({1}, float4(d.boxCenter, d.boxHalfExtents.x));
+    grad.add({2}, float4(d.boxHalfExtents.y, d.boxHalfExtents.z, d.torusCenter.x, d.torusCenter.y));
+    grad.add({3}, float4(d.torusCenter.z, d.torusRadii.x, d.torusRadii.y, d.smoothK));
 }
 
 // Each sample point accumulates its contribution to the SDF parameter gradients.
@@ -223,7 +223,7 @@ float4 renderSDFSideBySide(
         int2 tc = int2(
             clamp(int(u * imageRes.x), 0, int(imageRes.x) - 1),
             clamp(int(v_coord * imageRes.y), 0, int(imageRes.y) - 1));
-        return leftImage.get({tc.x, tc.y});
+        return leftImage.load(tc);
     }
     else
     {
@@ -232,6 +232,6 @@ float4 renderSDFSideBySide(
         int2 tc = int2(
             clamp(int(u * imageRes.x), 0, int(imageRes.x) - 1),
             clamp(int(v_coord * imageRes.y), 0, int(imageRes.y) - 1));
-        return rightImage.get({tc.x, tc.y});
+        return rightImage.load(tc);
     }
 }
