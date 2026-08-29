@@ -1,6 +1,10 @@
 //   - Forward rendering via ray casting + Blinn-Phong shading
-//   - Backward-mode autodiff through the full render pipeline
+//   - Backward-mode autodiff through the shading of the hit point
 //   - Gradient accumulation for material optimization
+//
+// The albedo is the only unknown here. Geometry and lighting are fixed, so
+// they are marked no_diff and the closest-hit search runs outside the
+// differentiated region, its result reaching the loss as a constant.
 
 __exported import common;
 __exported import intersection;
@@ -11,53 +15,36 @@ import slangpy;
 // Differentiable per-pixel loss
 // ============================================================================
 
-// Shade a single triangle hit (differentiable w.r.t. vertices and material).
+// Shade a surface point that has already been located. The hit data is no_diff
+// because it comes from the closest-hit search, which is not differentiated;
+// the material is the only parameter carrying a derivative.
 [Differentiable]
-float3 shadeTriangleHit(
-    float3 v0, float3 v1, float3 v2,
-    no_diff Ray ray,
+float3 shadeSurface(
+    no_diff HitInfo hit,
     Material material,
-    PointLight lights[2],
+    no_diff PointLight lights[2],
     int numLights,
     no_diff float3 camPos)
 {
-    float t;
-    float2 bary;
-    bool hit = rayTriangleIntersect(ray, v0, v1, v2, t, bary);
-
-    if (!hit)
-        return float3(0.0f);
-
-    float3 hitPos = ray.origin + ray.direction * t;
-    float3 normal = triangleNormal(v0, v1, v2);
-    float3 viewDir = normalize(camPos - hitPos);
-
-    HitInfo hitInfo;
-    hitInfo.t = t;
-    hitInfo.normal = normal;
-    hitInfo.position = hitPos;
-    hitInfo.bary = bary;
-    hitInfo.materialIdx = 0;
-    hitInfo.hit = true;
-
-    return shadeHit(hitInfo, material, lights, numLights, viewDir);
+    float3 viewDir = normalize(camPos - hit.position);
+    return shadeHit(hit, material, lights, numLights, viewDir);
 }
 
-// Per-pixel MSE loss computing the target on-the-fly from a target material.
-// Both rendered and target go through the SAME compiled shadeTriangleHit,
-// guaranteeing zero loss and zero gradient when materials match exactly
+// Per-pixel squared error between the current material and the target material
+// at the same surface point. Both evaluate through the same compiled
+// shadeSurface, so the loss and its gradient are exactly zero when the two
+// materials match.
 [Differentiable]
 float pixelLossMat(
-    float3 v0, float3 v1, float3 v2,
-    no_diff Ray ray,
+    no_diff HitInfo hit,
     Material material,
     no_diff Material targetMaterial,
-    PointLight lights[2],
+    no_diff PointLight lights[2],
     int numLights,
     no_diff float3 camPos)
 {
-    float3 rendered = shadeTriangleHit(v0, v1, v2, ray, material, lights, numLights, camPos);
-    float3 target = detach(shadeTriangleHit(v0, v1, v2, ray, targetMaterial, lights, numLights, camPos));
+    float3 rendered = shadeSurface(hit, material, lights, numLights, camPos);
+    float3 target = shadeSurface(hit, targetMaterial, lights, numLights, camPos);
     float3 diff = rendered - target;
     return dot(diff, diff);
 }
@@ -78,8 +65,7 @@ float4 renderScene(
     int numLights)
 {
     Ray ray = camera.generateRay(float2(pixelCoord), resolution);
-    int hitTriIdx;
-    HitInfo hit = traceMeshClosest(ray, vertices, numTris, hitTriIdx);
+    HitInfo hit = traceMeshClosest(ray, vertices, numTris);
 
     if (!hit.hit)
     {
@@ -98,8 +84,6 @@ float4 renderScene(
 // ============================================================================
 
 // Each pixel accumulates its contribution to the albedo gradient atomically.
-// Uses pixelLossMat so both rendered and target colors are computed inside the
-// same auto diff code path
 void computeAlbedoGradients(
     Camera camera,
     int2 pixelCoord,
@@ -113,27 +97,20 @@ void computeAlbedoGradients(
     AtomicTensor<float3, 1> albedoGrad)
 {
     Ray ray = camera.generateRay(float2(pixelCoord), resolution);
-    int hitTriIdx;
-    HitInfo hit = traceMeshClosest(ray, vertices, numTris, hitTriIdx);
+
+    // The closest-hit search picks one triangle out of many. That choice is
+    // discrete, so it stays outside the differentiated region.
+    HitInfo hit = traceMeshClosest(ray, vertices, numTris);
 
     if (!hit.hit)
         return;
 
-    float3 v0 = vertices[hitTriIdx * 3 + 0];
-    float3 v1 = vertices[hitTriIdx * 3 + 1];
-    float3 v2 = vertices[hitTriIdx * 3 + 2];
-
-    var dv0 = diffPair(v0);
-    var dv1 = diffPair(v1);
-    var dv2 = diffPair(v2);
+    // The material is the only unknown, so it is the only differential pair.
     var dMat = diffPair(material);
-    PointLight lightsArr[2] = lights;
-    var dLights = diffPair(lightsArr);
 
     // Backward pass with seed = 1.0 (dLoss/dLoss = 1)
     bwd_diff(pixelLossMat)(
-        dv0, dv1, dv2,
-        ray, dMat, targetMaterial, dLights, numLights,
+        hit, dMat, targetMaterial, lights, numLights,
         camera.position,
         1.0f);
 
@@ -173,4 +150,3 @@ float4 renderSideBySide(
         return rightImage.load(tc);
     }
 }
-

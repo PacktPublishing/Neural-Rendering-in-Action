@@ -3,7 +3,6 @@ import slangpy;
 
 // Moeller-Trumbore ray-triangle intersection.
 // Returns true if the ray hits the triangle, writing t and barycentric coords.
-[Differentiable]
 bool rayTriangleIntersect(
     Ray ray,
     float3 v0, float3 v1, float3 v2,
@@ -55,15 +54,12 @@ float3 triangleNormal(float3 v0, float3 v1, float3 v2)
 }
 
 // Find closest hit triangle in a mesh (non-differentiable; discrete selection).
-// Returns HitInfo and the index of the hit triangle (-1 if none).
 HitInfo traceMeshClosest(
     Ray ray,
     Tensor<float3, 1> vertices,
-    int numTris,
-    out int hitTriIdx)
+    int numTris)
 {
     HitInfo closest = noHit();
-    hitTriIdx = -1;
 
     for (int i = 0; i < numTris; i++)
     {
@@ -83,7 +79,6 @@ HitInfo traceMeshClosest(
             closest.normal = triangleNormal(v0, v1, v2);
             closest.position = ray.origin + ray.direction * t;
             closest.materialIdx = 0;
-            hitTriIdx = i;
         }
     }
     return closest;
