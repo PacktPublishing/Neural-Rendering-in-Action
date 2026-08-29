@@ -1,27 +1,29 @@
 // Section 2: Sphere Tracing with Differentiable Distance Functions
-// SDF primitives, CSG operations, and differentiable sphere tracing.
+// SDF primitives, CSG operations, and sphere tracing.
 
 __exported import common;
 __exported import shading;
 import slangpy;
 
 // ---- SDF Primitives ----
+// The probe point p is a fixed sample position, never something we recover,
+// so it is no_diff. The shape parameters are what carry derivatives.
 
 [Differentiable]
-float sdSphere(float3 p, float3 center, float radius)
+float sdSphere(no_diff float3 p, float3 center, float radius)
 {
     return length(p - center) - radius;
 }
 
 [Differentiable]
-float sdBox(float3 p, float3 center, float3 halfExtents)
+float sdBox(no_diff float3 p, float3 center, float3 halfExtents)
 {
     float3 d = abs(p - center) - halfExtents;
     return length(max(d, 0.0f)) + min(max(d.x, max(d.y, d.z)), 0.0f);
 }
 
 [Differentiable]
-float sdTorus(float3 p, float3 center, float2 radii)
+float sdTorus(no_diff float3 p, float3 center, float2 radii)
 {
     float3 q = p - center;
     float2 xz = float2(q.x, q.z);
@@ -30,7 +32,7 @@ float sdTorus(float3 p, float3 center, float2 radii)
 }
 
 [Differentiable]
-float sdPlane(float3 p, float3 normal, float offset)
+float sdPlane(no_diff float3 p, float3 normal, float offset)
 {
     return dot(p, normalize(normal)) - offset;
 }
@@ -73,7 +75,7 @@ struct SDFSceneParams : IDifferentiable
 
 // Evaluate the combined SDF scene.
 [Differentiable]
-float evalScene(float3 p, SDFSceneParams params)
+float evalScene(no_diff float3 p, SDFSceneParams params)
 {
     float dSphere = sdSphere(p, params.sphereCenter, params.sphereRadius);
     float dBox = sdBox(p, params.boxCenter, params.boxHalfExtents);
@@ -84,8 +86,8 @@ float evalScene(float3 p, SDFSceneParams params)
     return d;
 }
 
-// Compute SDF normal via central differences.
-[Differentiable]
+// Compute SDF normal via central differences. Used only for display shading,
+// so it is not differentiated.
 float3 sdfNormal(float3 p, SDFSceneParams params)
 {
     const float eps = 0.001f;
@@ -97,27 +99,26 @@ float3 sdfNormal(float3 p, SDFSceneParams params)
     return normalize(n);
 }
 
-// Differentiable sphere tracing with fixed iteration count.
-// Convergence checks are non-differentiable; position updates are differentiable.
+// Sphere tracing with a fixed iteration cap. The loss in this recipe works in SDF
+// space rather than image space, so the ray march is display-only and never has
+// to be differentiated.
 static const int TRACE_MAX_STEPS = 96;
 static const float TRACE_MAX_DIST = 50.0f;
 static const float TRACE_HIT_EPS = 0.001f;
 
-[Differentiable]
 float sphereTrace(Ray ray, SDFSceneParams params)
 {
     float t = 0.0f;
 
-    [MaxIters(96)]
     for (int i = 0; i < TRACE_MAX_STEPS; i++)
     {
         float3 p = ray.origin + ray.direction * t;
         float d = evalScene(p, params);
 
-        if (detach(d) < TRACE_HIT_EPS)
+        if (d < TRACE_HIT_EPS)
             return t;
 
-        if (detach(t) > TRACE_MAX_DIST)
+        if (t > TRACE_MAX_DIST)
             return -1.0f;
 
         t = t + d;
