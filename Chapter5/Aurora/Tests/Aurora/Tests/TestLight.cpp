@@ -1,0 +1,506 @@
+// Copyright 2025 Autodesk, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Disable unit test as causes failure in debug mode
+#if _DEBUG
+#define DISABLE_UNIT_TESTS
+#endif
+
+#if !defined(DISABLE_UNIT_TESTS)
+
+#include <array>
+#include <chrono>
+#include <cmath>
+
+#include "AuroraTestHelpers.h"
+#include "BaselineImageHelpers.h"
+
+#include <fstream>
+
+using namespace Aurora;
+
+namespace
+{
+
+class LightTest : public TestHelpers::FixtureBase
+{
+public:
+    LightTest() {}
+    ~LightTest() {}
+};
+
+// Create test HDR lat-long environment map image data, interpolated from colors for on six
+// directions (+/- X, +/- Y, +/- Z)
+// If lightIntensity non-zero bright region added around lightDirec vector.
+void createTestEnv(IScenePtr scene, const Path& path, int height, const array<glm::vec3, 6>& colors,
+    glm::vec3 lightDirection, glm::vec3 lightColor, float lightAngle, float lightIntensity,
+    bool isRGBA)
+{
+    // Create and return Aurora Environment Map Path.
+    ImageDescriptor imageDesc;
+    imageDesc.isEnvironment = true;
+    imageDesc.linearize     = true;
+    imageDesc.getData = [lightAngle, lightIntensity, lightColor, lightDirection, colors, height,
+                            isRGBA](ImageData& dataOut, AllocateBufferFunction alloc) {
+        // Width is always 2x height for lat-long.
+        int width = height * 2;
+
+        // Allocate data for image.
+        int numComp         = isRGBA ? 4 : 3;
+        size_t numBytes     = static_cast<size_t>(width) * static_cast<size_t>(height)
+            * sizeof(float) * static_cast<size_t>(numComp);
+        float* pPixelsStart = (float*)alloc(numBytes);
+        float* pPixels      = pPixelsStart;
+
+        float lightAngleRad = glm::radians(lightAngle);
+
+        // Iterate through rows of image.
+        for (int row = 0; row < height; row++)
+        {
+            // Compute Phi angle in radians from row.
+            float v   = (float)row / (float)(height - 1);
+            float phi = v * (float)M_PI;
+
+            // Iterate through columns.
+            for (int col = 0; col < width; col++)
+            {
+                // Compute Theta angle in radians from column.
+                float u     = (float)col / (float)(width - 1);
+                float theta = u * 2.0f * (float)M_PI;
+
+                // Compute direction from spherical coordinate.
+                glm::vec3 dir(sinf(theta) * sinf(phi), cosf(phi), cosf(theta) * sinf(phi));
+
+                // Compute color for each axis in direction.
+                glm::vec3 color;
+                color += dir.x > 0.0 ? colors[0] * dir.x : colors[1] * -1.0f * dir.x;
+                color += dir.y > 0.0 ? colors[2] * dir.y : colors[3] * -1.0f * dir.y;
+                color += dir.z > 0.0 ? colors[4] * dir.z : colors[5] * -1.0f * dir.z;
+
+                if (lightIntensity > 0.0f)
+                {
+                    float currLightAngleRad = acosf(glm::dot(dir, normalize(lightDirection)));
+                    if (currLightAngleRad < lightAngleRad)
+                    {
+                        color = lightColor * lightIntensity;
+                    }
+                }
+
+                // Put into pixels array.
+                *(pPixels++) = color.x;
+                *(pPixels++) = color.y;
+                *(pPixels++) = color.z;
+
+                // Add alpha component if needed.
+                if (isRGBA)
+                    *(pPixels++) = 1.0f;
+            }
+        }
+        AU_ASSERT(pPixelsStart + (static_cast<size_t>(width) * static_cast<size_t>(height) * static_cast<size_t>(numComp)) == pPixels, "Buffer overrun");
+
+        // Get address and size from buffer (assumes will be called from scope of test, so buffer
+        // still valid)
+        dataOut.pPixelBuffer = pPixelsStart;
+        dataOut.bufferSize   = numBytes;
+        dataOut.dimensions   = { width, height };
+        dataOut.format       = isRGBA ? ImageFormat::Float_RGBA : ImageFormat::Float_RGB;
+        return true;
+    };
+
+    scene->setImageDescriptor(path, imageDesc);
+}
+
+// Basic environment map image test.
+TEST_P(LightTest, TestLightEnvTexture)
+{
+    // Create the default scene (also creates renderer)
+    auto pScene    = createDefaultScene();
+    auto pRenderer = defaultRenderer();
+
+    // If pRenderer is null this renderer type not supported, skip rest of the test.
+    if (!pRenderer)
+        return;
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
+    // Disable the directional light.
+    defaultDistantLight()->values().setFloat3(
+        Aurora::Names::LightProperties::kDirection, value_ptr(glm::vec3(0, 0, 1)));
+    defaultDistantLight()->values().setFloat3(
+        Aurora::Names::LightProperties::kColor, value_ptr(glm::vec3(0, 0, 0)));
+
+    // Create procedural image data.
+    array<glm::vec3, 6> colors = {
+        glm::vec3(1.0f, 0.0f, 0.0f),
+        glm::vec3(0.0f, 1.0f, 0.0f),
+        glm::vec3(0.0f, 0.75f, 1.0f),
+        glm::vec3(0.75f, 0.0f, 1.0f),
+        glm::vec3(0.8f, 0.0f, 0.0f),
+        glm::vec3(0.0f, 0.8f, 0.0f),
+    };
+    const Path kBackgroundEnvironmentImagePath = "BackgroundEnvironmentImage";
+#if defined(__APPLE__)
+    // NOTE: Metal does not support HgiFormatFloat32Vec3.
+    createTestEnv(pScene, kBackgroundEnvironmentImagePath, 512, colors, glm::vec3(), glm::vec3(), 0,
+        0, true);
+#else
+    createTestEnv(pScene, kBackgroundEnvironmentImagePath, 512, colors, glm::vec3(), glm::vec3(), 0,
+        0, false);
+#endif
+
+    // Create environment and set background and light image.
+    const Path kBackgroundEnvironmentPath = "BackgroundEnvironment";
+    pScene->setEnvironmentProperties(kBackgroundEnvironmentPath,
+        {
+            { Names::EnvironmentProperties::kLightImage, kBackgroundEnvironmentImagePath },
+            { Names::EnvironmentProperties::kBackgroundImage, kBackgroundEnvironmentImagePath },
+        });
+
+    // Set the environment.
+    pScene->setEnvironment(kBackgroundEnvironmentPath);
+
+    // Create a material.
+    const Path kMaterialPath = "DefaultMaterial";
+    pScene->setMaterialType(kMaterialPath);
+
+    // Create teapot instance.
+    Path GeomPath = createTeapotGeometry(*pScene);
+
+    // Create instance with material.
+    EXPECT_TRUE(pScene->addInstance(
+        nextPath(), GeomPath, { { Names::InstanceProperties::kMaterial, kMaterialPath } }));
+
+    // Render the scene and check baseline image.
+    ASSERT_BASELINE_IMAGE_PASSES_IN_FOLDER(currentTestName(), "Light");
+}
+
+TEST_P(LightTest, TestChangeLightEnvTexture)
+{
+    // Create the default scene (also creates renderer)
+    auto pScene    = createDefaultScene();
+    auto pRenderer = defaultRenderer();
+
+    // If pRenderer is null this renderer type not supported, skip rest of the test.
+    if (!pRenderer)
+        return;
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
+    // Disable the directional light.
+    defaultDistantLight()->values().setFloat3(
+        Aurora::Names::LightProperties::kDirection, value_ptr(glm::vec3(0, 0, 1)));
+    defaultDistantLight()->values().setFloat3(
+        Aurora::Names::LightProperties::kColor, value_ptr(glm::vec3(0, 0, 0)));
+
+    // Create procedural image data.
+    array<glm::vec3, 6> colors = {
+        glm::vec3(1.0f, 0.0f, 0.0f),
+        glm::vec3(0.0f, 1.0f, 0.0f),
+        glm::vec3(0.0f, 0.75f, 1.0f),
+        glm::vec3(0.75f, 0.0f, 1.0f),
+        glm::vec3(0.8f, 0.0f, 0.0f),
+        glm::vec3(0.0f, 0.8f, 0.0f),
+    };
+    const Path kBackgroundEnvironmentImagePath = "BackgroundEnvironmentImage";
+#if defined(__APPLE__)
+    // NOTE: Metal does not support HgiFormatFloat32Vec3.
+    createTestEnv(pScene, kBackgroundEnvironmentImagePath, 512, colors, glm::vec3(), glm::vec3(), 0,
+        0, true);
+#else
+    createTestEnv(pScene, kBackgroundEnvironmentImagePath, 512, colors, glm::vec3(), glm::vec3(), 0,
+        0, false);
+#endif
+
+    // Create environment and set background and light image.
+    const Path kBackgroundEnvironmentPath = "BackgroundEnvironment";
+    pScene->setEnvironmentProperties(kBackgroundEnvironmentPath,
+        {
+            { Names::EnvironmentProperties::kLightImage, kBackgroundEnvironmentImagePath },
+            { Names::EnvironmentProperties::kBackgroundImage, kBackgroundEnvironmentImagePath },
+        });
+
+    // Set the environment.
+    pScene->setEnvironment(kBackgroundEnvironmentPath);
+
+    // Create a material.
+    const Path kMaterialPath = "DefaultMaterial";
+    pScene->setMaterialType(kMaterialPath);
+
+    // Create teapot instance.
+    Path GeomPath = createTeapotGeometry(*pScene);
+
+    // Create instance with material.
+    EXPECT_TRUE(pScene->addInstance(
+        nextPath(), GeomPath, { { Names::InstanceProperties::kMaterial, kMaterialPath } }));
+
+    // Render the scene and check baseline image.
+    ASSERT_BASELINE_IMAGE_PASSES_IN_FOLDER(currentTestName() + "0", "Light");
+
+    // Create procedural image data.
+    array<glm::vec3, 6> colors1 = {
+        glm::vec3(1.0f, 1.0f, 0.0f),
+        glm::vec3(0.0f, 0.1f, 0.0f),
+        glm::vec3(1.0f, 0.75f, 1.0f),
+        glm::vec3(0.75f, 0.0f, 1.0f),
+        glm::vec3(0.8f, 0.0f, 0.0f),
+        glm::vec3(1.0f, 0.8f, 0.4f),
+    };
+    const Path kSecondBackgroundEnvironmentImagePath = "SecondBackgroundEnvironmentImage";
+#if defined(__APPLE__)
+    // NOTE: Metal does not support HgiFormatFloat32Vec3.
+    createTestEnv(pScene, kSecondBackgroundEnvironmentImagePath, 512, colors1, glm::vec3(),
+        glm::vec3(), 0, 0, true);
+#else
+    createTestEnv(pScene, kSecondBackgroundEnvironmentImagePath, 512, colors1, glm::vec3(),
+        glm::vec3(), 0, 0, false);
+#endif
+    pScene->setEnvironmentProperties(kBackgroundEnvironmentPath,
+        {
+            { Names::EnvironmentProperties::kLightImage, kSecondBackgroundEnvironmentImagePath },
+            { Names::EnvironmentProperties::kBackgroundImage,
+                kSecondBackgroundEnvironmentImagePath },
+        });
+
+    // Render the scene and check baseline image.
+    ASSERT_BASELINE_IMAGE_PASSES_IN_FOLDER(currentTestName() + "1", "Light");
+}
+
+// Basic environment map image test.
+#if defined(__APPLE__)
+TEST_P(LightTest, DISABLED_TestLightEnvTextureMIS) // TODO: Fix and re-enable this test.
+#else
+TEST_P(LightTest, TestLightEnvTextureMIS)
+#endif
+{
+    // Create the default scene (also creates renderer)
+    auto pScene    = createDefaultScene();
+    auto pRenderer = defaultRenderer();
+    // If pRenderer is null this renderer type not supported, skip rest of the test.
+    if (!pRenderer)
+        return;
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
+    // Set wider FOV so both teapots visible.
+    setDefaultRendererPerspective(60.0f);
+
+    // Disable the directional light.
+    defaultDistantLight()->values().setFloat3(
+        Aurora::Names::LightProperties::kDirection, value_ptr(glm::vec3(0, 0, 1)));
+    defaultDistantLight()->values().setFloat3(
+        Aurora::Names::LightProperties::kColor, value_ptr(glm::vec3(0, 0, 0)));
+
+    // Create procedural image data with small bright region.
+    array<glm::vec3, 6> colors = {
+        glm::vec3(1.0f, 0.0f, 0.0f),
+        glm::vec3(0.0f, 1.0f, 0.0f),
+        glm::vec3(0.0f, 0.75f, 1.0f),
+        glm::vec3(0.75f, 0.0f, 1.0f),
+        glm::vec3(0.8f, 0.0f, 0.0f),
+        glm::vec3(0.0f, 0.8f, 0.0f),
+    };
+    const Path kBackgroundEnvironmentImagePath = "BackgroundEnvironmentImage";
+#if defined(__APPLE__)
+    // NOTE: Metal does not support HgiFormatFloat32Vec3.
+    createTestEnv(pScene, kBackgroundEnvironmentImagePath, 1024, colors, glm::vec3(0, 0.2f, 1),
+        glm::vec3(0.9f, 0.8f, -0.8f), 0.5f, 5000.0f, true);
+#else
+    createTestEnv(pScene, kBackgroundEnvironmentImagePath, 1024, colors, glm::vec3(0, 0.2f, 1),
+        glm::vec3(0.9f, 0.8f, -0.8f), 0.5f, 5000.0f, false);
+#endif
+
+    // Create environment and set background and light image.
+    const Path kBackgroundEnvironmentPath = "BackgroundEnvironment";
+    pScene->setEnvironmentProperties(kBackgroundEnvironmentPath,
+        {
+            { Names::EnvironmentProperties::kLightImage, kBackgroundEnvironmentImagePath },
+            { Names::EnvironmentProperties::kBackgroundImage, kBackgroundEnvironmentImagePath },
+        });
+
+    // Set the environment.
+    pScene->setEnvironment(kBackgroundEnvironmentPath);
+
+    // Create geometry.
+    Path teapotPath = createTeapotGeometry(*pScene);
+    Path planePath  = createPlaneGeometry(*pScene);
+
+    // Create one glossy and one diffuse material
+    const Path kMaterialPath0 = "Material0";
+    pScene->setMaterialProperties(kMaterialPath0, { { "specular_roughness", 0.95f } });
+    const Path kMaterialPath1 = "Material1";
+    pScene->setMaterialProperties(kMaterialPath1, { { "specular_roughness", 0.05f } });
+
+    EXPECT_TRUE(pScene->addInstance(nextPath(), teapotPath,
+        { { Names::InstanceProperties::kTransform, glm::translate(glm::vec3(+3, -1.5, 3)) },
+            { Names::InstanceProperties::kMaterial, kMaterialPath0 } }));
+    EXPECT_TRUE(pScene->addInstance(nextPath(), planePath,
+        { { Names::InstanceProperties::kTransform,
+              glm::translate(glm::vec3(+50, -1.5, 0)) *
+                  glm::rotate(static_cast<float>(M_PI * 0.5), glm::vec3(1, 0, 0)) *
+                  glm::scale(glm::vec3(50, 50, 50)) },
+            { Names::InstanceProperties::kMaterial, kMaterialPath1 } }));
+
+    EXPECT_TRUE(pScene->addInstance(nextPath(), teapotPath,
+        { { Names::InstanceProperties::kTransform, glm::translate(glm::vec3(-3, -1.5, 3)) },
+            { Names::InstanceProperties::kMaterial, kMaterialPath0 } }));
+    EXPECT_TRUE(pScene->addInstance(nextPath(), planePath,
+        { { Names::InstanceProperties::kTransform,
+              glm::translate(glm::vec3(-50, -1.5, 0)) *
+                  glm::rotate(static_cast<float>(M_PI * 0.5), glm::vec3(1, 0, 0)) *
+                  glm::scale(glm::vec3(50, 50, 50)) },
+            { Names::InstanceProperties::kMaterial, kMaterialPath1 } }));
+
+    // Render the scene and check baseline image.
+    ASSERT_BASELINE_IMAGE_PASSES_IN_FOLDER(currentTestName(), "Light");
+}
+
+// Test multiple distant lights.
+#if defined(__APPLE__)
+TEST_P(LightTest, DISABLED_TestMultipleLights) // TODO: Fix and re-enable this test.
+#else
+TEST_P(LightTest, TestMultipleLights)
+#endif
+{
+    // Create the default scene (also creates renderer)
+    auto pScene    = createDefaultScene();
+    auto pRenderer = defaultRenderer();
+    // If pRenderer is null this renderer type not supported, skip rest of the test.
+    if (!pRenderer)
+        return;
+#if defined(__APPLE__)
+    pRenderer->options().setBoolean("isGammaCorrectionEnabled", true);
+#endif
+    // Set wider FOV so both teapots visible.
+    setDefaultRendererPerspective(60.0f);
+
+    // Add four directional lights (including default light).
+    defaultDistantLight()->values().setFloat3(
+        Aurora::Names::LightProperties::kDirection, value_ptr(glm::vec3(0, 0, 1)));
+    defaultDistantLight()->values().setFloat3(
+        Aurora::Names::LightProperties::kColor, value_ptr(glm::vec3(0.5f, 1, 0.6f)));
+    defaultDistantLight()->values().setFloat(Aurora::Names::LightProperties::kIntensity, 3.0f);
+    defaultDistantLight()->values().setFloat(
+        Aurora::Names::LightProperties::kAngularDiameter, 0.4f);
+
+    ILightPtr pSecondLight =
+        defaultScene()->addLightPointer(Aurora::Names::LightTypes::kDistantLight);
+    pSecondLight->values().setFloat3(
+        Aurora::Names::LightProperties::kDirection, value_ptr(glm::vec3(0, -1, 0)));
+    pSecondLight->values().setFloat3(
+        Aurora::Names::LightProperties::kColor, value_ptr(glm::vec3(1.0f, 1, 0.2f)));
+    pSecondLight->values().setFloat(Aurora::Names::LightProperties::kIntensity, 2.0f);
+    pSecondLight->values().setFloat(Aurora::Names::LightProperties::kAngularDiameter, 0.2f);
+
+    ILightPtr pThirdLight =
+        defaultScene()->addLightPointer(Aurora::Names::LightTypes::kDistantLight);
+    pThirdLight->values().setFloat3(
+        Aurora::Names::LightProperties::kDirection, value_ptr(glm::vec3(-1, -1, 0)));
+    pThirdLight->values().setFloat3(
+        Aurora::Names::LightProperties::kColor, value_ptr(glm::vec3(0.1f, 0.1, 1.0f)));
+    pThirdLight->values().setFloat(Aurora::Names::LightProperties::kIntensity, 1.2f);
+    pThirdLight->values().setFloat(Aurora::Names::LightProperties::kAngularDiameter, 0.1f);
+
+    ILightPtr pFourthLight =
+        defaultScene()->addLightPointer(Aurora::Names::LightTypes::kDistantLight);
+    pFourthLight->values().setFloat3(
+        Aurora::Names::LightProperties::kDirection, value_ptr(glm::vec3(+1, -1, 0)));
+    pFourthLight->values().setFloat3(
+        Aurora::Names::LightProperties::kColor, value_ptr(glm::vec3(1.0f, 0.1, 0.0f)));
+    pFourthLight->values().setFloat(Aurora::Names::LightProperties::kIntensity, 1.2f);
+    pFourthLight->values().setFloat(Aurora::Names::LightProperties::kAngularDiameter, 0.1f);
+
+    // Fifth light will be ignored as only 4 supported.
+    ILightPtr pFifthLight =
+        defaultScene()->addLightPointer(Aurora::Names::LightTypes::kDistantLight);
+    pFifthLight->values().setFloat3(
+        Aurora::Names::LightProperties::kDirection, value_ptr(glm::vec3(0, -1, 0)));
+    pFifthLight->values().setFloat3(
+        Aurora::Names::LightProperties::kColor, value_ptr(glm::vec3(1.0f, 1.0, 1.0f)));
+    pFifthLight->values().setFloat(Aurora::Names::LightProperties::kIntensity, 100.0f);
+    pFifthLight->values().setFloat(Aurora::Names::LightProperties::kAngularDiameter, 0.8f);
+
+    // Create black environment map.
+    std::vector<unsigned char> buffer;
+    array<glm::vec3, 6> colors = {
+        glm::vec3(0.0f, 0.0f, 0.0f),
+        glm::vec3(0.0f, 0.0f, 0.0f),
+        glm::vec3(0.0f, 0.0f, 0.0f),
+        glm::vec3(0.0f, 0.0f, 0.0f),
+        glm::vec3(0.0f, 0.0f, 0.0f),
+        glm::vec3(0.0f, 0.0f, 0.0f),
+    };
+    const Path kBackgroundEnvironmentImagePath = "BackgroundEnvironmentImage";
+#if defined(__APPLE__)
+    // NOTE: Metal does not support HgiFormatFloat32Vec3.
+    createTestEnv(pScene, kBackgroundEnvironmentImagePath, 1024, colors, glm::vec3(0, 0.2f, 1),
+        glm::vec3(0.9f, 0.8f, -0.8f), 0.0001f, 0.0f, true);
+#else
+    createTestEnv(pScene, kBackgroundEnvironmentImagePath, 1024, colors, glm::vec3(0, 0.2f, 1),
+        glm::vec3(0.9f, 0.8f, -0.8f), 0.0001f, 0.0f, false);
+#endif
+
+    // Create environment and set background and light image.
+    const Path kBackgroundEnvironmentPath = "BackgroundEnvironment";
+    pScene->setEnvironmentProperties(kBackgroundEnvironmentPath,
+        {
+            { Names::EnvironmentProperties::kLightImage, kBackgroundEnvironmentImagePath },
+            { Names::EnvironmentProperties::kBackgroundImage, kBackgroundEnvironmentImagePath },
+        });
+
+    // Set the environment.
+    pScene->setEnvironment(kBackgroundEnvironmentPath);
+
+    // Create geometry.
+    Path teapotPath = createTeapotGeometry(*pScene);
+    Path planePath  = createPlaneGeometry(*pScene);
+
+    // Create one glossy and one diffuse material
+    const Path kMaterialPath0 = "Material0";
+    pScene->setMaterialProperties(kMaterialPath0, { { "specular_roughness", 0.95f } });
+    const Path kMaterialPath1 = "Material1";
+    pScene->setMaterialProperties(kMaterialPath1, { { "specular_roughness", 0.05f } });
+
+    EXPECT_TRUE(pScene->addInstance(nextPath(), teapotPath,
+        { { Names::InstanceProperties::kTransform, glm::translate(glm::vec3(+3, -1.5, 3)) },
+            { Names::InstanceProperties::kMaterial, kMaterialPath0 } }));
+    EXPECT_TRUE(pScene->addInstance(nextPath(), planePath,
+        { { Names::InstanceProperties::kTransform,
+              glm::translate(glm::vec3(+50, -1.5, 0)) *
+                  glm::rotate(static_cast<float>(M_PI * 0.5), glm::vec3(1, 0, 0)) *
+                  glm::scale(glm::vec3(50, 50, 50)) },
+            { Names::InstanceProperties::kMaterial, kMaterialPath1 } }));
+
+    EXPECT_TRUE(pScene->addInstance(nextPath(), teapotPath,
+        { { Names::InstanceProperties::kTransform, glm::translate(glm::vec3(-3, -1.5, 3)) },
+            { Names::InstanceProperties::kMaterial, kMaterialPath0 } }));
+    EXPECT_TRUE(pScene->addInstance(nextPath(), planePath,
+        { { Names::InstanceProperties::kTransform,
+              glm::translate(glm::vec3(-50, -1.5, 0)) *
+                  glm::rotate(static_cast<float>(M_PI * 0.5), glm::vec3(1, 0, 0)) *
+                  glm::scale(glm::vec3(50, 50, 50)) },
+            { Names::InstanceProperties::kMaterial, kMaterialPath1 } }));
+
+    // Render the scene and check baseline image.
+    ASSERT_BASELINE_IMAGE_PASSES_IN_FOLDER(currentTestName(), "Light");
+
+    // Delete one of the lights (the fifth light will now be used.)
+    pFourthLight.reset();
+    ASSERT_BASELINE_IMAGE_PASSES_IN_FOLDER(currentTestName() + "Deleted", "Light");
+}
+
+INSTANTIATE_TEST_SUITE_P(LightTests, LightTest, TEST_SUITE_RENDERER_TYPES());
+
+} // namespace
+
+#endif

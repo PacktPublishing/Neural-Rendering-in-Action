@@ -1,0 +1,19 @@
+# Ignore build directories.
+build/
+Build/
+Build.*/
+_build/
+Externals/
+_externals/
+
+# Ignore script generated files
+Scripts/cmake/externalsConfig.cmake
+__pycache__
+.DS_Store
+.venv
+plugInfo.json
+
+# Ignore IDE cache folders
+.vs/
+.vscode/
+.idea/
