@@ -1,0 +1,259 @@
+// Copyright 2025 Autodesk, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+#pragma once
+
+#include "PTEnvironment.h"
+#include "PTGeometry.h"
+#include "PTGroundPlane.h"
+#include "PTMaterial.h"
+#include "PTSampler.h"
+#include "PTScene.h"
+#include "PTShaderLibrary.h"
+#include "PTTarget.h"
+#include "RendererBase.h"
+
+// Include the denoiser if it is enabled.
+#if defined(ENABLE_DENOISER)
+#include "Denoiser.h"
+#endif
+
+BEGIN_AURORA
+
+// Forward references.
+class AssetManager;
+class PTDevice;
+class MaterialShader;
+class PTShaderLibrary;
+class ScratchBufferPool;
+class VertexBufferPool;
+struct TransferBuffer;
+
+// An path tracing (PT) implementation for IRenderer.
+class PTRenderer : public RendererBase
+{
+public:
+    /*** Types ***/
+
+    template <typename DataType>
+    using FillDataFunction = function<void(DataType&)>;
+
+    /*** Lifetime Management ***/
+
+    /// Path tracing renderer constructor.
+    ///
+    /// \param activeTaskCount Maximum number of tasks active at once.
+    PTRenderer(uint32_t activeTaskCount);
+    ~PTRenderer();
+
+    /*** IRenderer Functions ***/
+
+    IWindowPtr createWindow(WindowHandle handle, uint32_t width, uint32_t height) override;
+    IRenderBufferPtr createRenderBuffer(int width, int height, ImageFormat imageFormat) override;
+    IImagePtr createImagePointer(const IImage::InitData& initData) override;
+    ISamplerPtr createSamplerPointer(const Properties& props) override;
+    IMaterialPtr createMaterialPointer(const string& materialType = Names::MaterialTypes::kBuiltIn,
+        const string& document = "Default", const string& name = "") override;
+    IScenePtr createScene() override;
+    IEnvironmentPtr createEnvironmentPointer() override;
+    IGeometryPtr createGeometryPointer(
+        const GeometryDescriptor& desc, const string& name = "") override;
+    IGroundPlanePtr createGroundPlanePointer() override;
+    IRenderer::Backend backend() const override { return IRenderer::Backend::DirectX; }
+    void setScene(const IScenePtr& pScene) override;
+    void setTargets(const TargetAssignments& targetAssignments) override;
+    void render(uint32_t sampleStart, uint32_t sampleCount) override;
+    void waitForTask() override;
+    const vector<string>& builtInMaterials() override;
+    void setLoadResourceFunction(LoadResourceFunction func) override;
+
+    /*** Functions ***/
+
+    ID3D12Device5* dxDevice() const { return _pDXDevice.Get(); }
+    IDXGIFactory4* dxFactory() const { return _pDXFactory.Get(); }
+    ID3D12CommandQueue* commandQueue() const { return _pCommandQueue.Get(); }
+    // Create a transfer buffer.  GPU buffer state defaults to D3D12_RESOURCE_STATE_COPY_DEST as it
+    // is used as a target for a resource copy command. The final GPU buffer state defaults to
+    // D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.
+    TransferBuffer createTransferBuffer(size_t sz, const string& name = "",
+        D3D12_RESOURCE_FLAGS gpuBufferFlags       = D3D12_RESOURCE_FLAG_NONE,
+        D3D12_RESOURCE_STATES gpuBufferState      = D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATES gpuBufferFinalState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    ID3D12ResourcePtr createBuffer(size_t size, const string& name = "",
+        D3D12_HEAP_TYPE heapType    = D3D12_HEAP_TYPE_UPLOAD,
+        D3D12_RESOURCE_FLAGS flags  = D3D12_RESOURCE_FLAG_NONE,
+        D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_GENERIC_READ);
+    template <typename DataType>
+    void updateBuffer(TransferBuffer& bufferOut, FillDataFunction<DataType> fillDataFunction);
+    ID3D12ResourcePtr createTexture(uvec2 dimensions, DXGI_FORMAT format, const string& name = "",
+        bool isUnorderedAccess = false, bool shareable = false);
+    D3D12_GPU_VIRTUAL_ADDRESS getScratchBuffer(size_t size);
+    void getVertexBuffer(VertexBuffer& vertexBuffer, void* pData, size_t size);
+    void transferBufferUpdated(const TransferBuffer& buffer);
+    void flushVertexBufferPool();
+    void uploadTransferBuffers();
+    void deleteUploadedTransferBuffers();
+    ID3D12CommandAllocator* getCommandAllocator();
+    ID3D12GraphicsCommandList4* beginCommandList();
+    void submitCommandList();
+    void addTransitionBarrier(ID3D12Resource* pResource, D3D12_RESOURCE_STATES stateBefore,
+        D3D12_RESOURCE_STATES stateAfter);
+    void addUAVBarrier(ID3D12Resource* pResource);
+    void completeTask();
+    PTSamplerPtr defaultSampler();
+    PTGroundPlanePtr defaultGroundPlane();
+
+private:
+    // Accumulation settings GPU data.
+    struct Accumulation
+    {
+        unsigned int sampleIndex;
+        unsigned int isDenoisingEnabled;
+    };
+
+    /*** Private Types ***/
+    static const size_t _FRAME_DATA_SIZE =
+        ALIGNED_SIZE(sizeof(FrameData), D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+
+    /*** Private Functions ***/
+
+    bool initDevice();
+    void initCommandList();
+    void initFrameData();
+    void initRayGenShaderTable();
+    void initAccumulation();
+    void initPostProcessing();
+    void renderInternal(uint32_t sampleStart, uint32_t sampleCount);
+    void updateRayGenShaderTable();
+    void updateFrameData();
+    void updateSceneResources();
+    void updateOutputResources();
+    void updateDenoisingResources();
+    bool updateAccumulationGPUStruct(uint32_t sampleIndex, Accumulation* pStaging = nullptr);
+    void prepareRayDispatch(D3D12_DISPATCH_RAYS_DESC& dispatchRaysDesc);
+    void submitRayDispatch(const D3D12_DISPATCH_RAYS_DESC& dispatchRaysDesc, uint32_t sampleIndex,
+        uint32_t seedOffset);
+    void submitDenoising(bool isRestart);
+    void submitAccumulation(uint32_t sampleIndex);
+    void submitPostProcessing();
+    void createUAV(ID3D12Resource* pTexture, CD3DX12_CPU_DESCRIPTOR_HANDLE& handle);
+    void copyTextureToTarget(ID3D12Resource* pTexture, PTTarget* pTarget);
+    bool isDenoisingAOVsEnabled() const;
+    PTScenePtr dxScene() { return static_pointer_cast<PTScene>(_pScene); }
+    PTShaderLibrary& shaderLibrary();
+
+    /*** Private Variables ***/
+
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+    void initDiffRendering();
+    void updateDiffRenderingResources();
+    void submitGradientAccum();
+    void setDiffTargetImage(const IImage::InitData& targetImage) override;
+    std::vector<float> getMaterialGradients() override;
+#endif
+
+    unique_ptr<PTDevice> _pDevice;
+    bool _isCommandListOpen = false;
+    TransferBuffer _frameDataBuffer;
+    PTEnvironmentPtr _pEnvironment;
+    uvec2 _outputDimensions;
+    bool _isDimensionsChanged = true;
+    uint32_t _seedOffset      = 0;
+    PTTargetPtr _pTargetFinal;
+    PTTargetPtr _pTargetDepthNDC;
+    bool _isDescriptorHeapChanged = true;
+    PTSamplerPtr _pDefaultSampler;
+    PTGroundPlanePtr _pDefaultGroundPlane;
+    Accumulation _accumData;
+
+    /*** DirectX 12 Objects ***/
+
+    ID3D12Device5Ptr _pDXDevice;
+    IDXGIFactory4Ptr _pDXFactory;
+    ID3D12CommandQueuePtr _pCommandQueue;
+    map<ID3D12Resource*, TransferBuffer> _pendingTransferBuffers;
+    map<ID3D12Resource*, TransferBuffer> _transferBuffersToDelete;
+    vector<ID3D12CommandAllocatorPtr> _commandAllocators;
+    ID3D12GraphicsCommandList4Ptr _pCommandList;
+    ID3D12FencePtr _pTaskFence;
+    HANDLE _hTaskEvent = nullptr;
+    ID3D12PipelineStatePtr _pAccumulationPipelineState;
+    ID3D12RootSignaturePtr _pAccumulationRootSignature;
+    ID3D12PipelineStatePtr _pPostProcessingPipelineState;
+    ID3D12RootSignaturePtr _pPostProcessingRootSignature;
+    ID3D12DescriptorHeapPtr _pDescriptorHeap;
+    ID3D12DescriptorHeapPtr _pSamplerDescriptorHeap;
+    UINT _handleIncrementSize = 0;
+    ID3D12ResourcePtr _pTexFinal;        // for tone-mapped final output (usually SDR)
+    ID3D12ResourcePtr _pTexDepthNDC;     // for NDC depth output (usually float)
+    ID3D12ResourcePtr _pTexAccumulation; // for accumulation (HDR)
+    ID3D12ResourcePtr _pTexDirect;       // for path tracing or direct lighting (HDR)
+    DXGI_FORMAT _finalFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    TransferBuffer _rayGenShaderTable;
+    size_t _rayGenShaderTableSize = 0;
+    unique_ptr<ScratchBufferPool> _pScratchBufferCache;
+    unique_ptr<VertexBufferPool> _pVertexBufferPool;
+    unordered_map<string, PTSamplerPtr> _mtlxSamplers;
+    /*** Denoising Variables ***/
+
+    // Include the denoiser if it is enabled. Other variables are still used for debug modes, even
+    // when denoising itself is not enabled.
+#if defined(ENABLE_DENOISER)
+    unique_ptr<Denoiser> _pDenoiser;
+#endif
+    ID3D12ResourcePtr _pDenoisingTexDepthView;
+    ID3D12ResourcePtr _pDenoisingTexNormalRoughness;
+    ID3D12ResourcePtr _pDenoisingTexBaseColorMetalness;
+    ID3D12ResourcePtr _pDenoisingTexDiffuse;
+    ID3D12ResourcePtr _pDenoisingTexGlossy;
+    ID3D12ResourcePtr _pDenoisingTexDiffuseOut;
+    ID3D12ResourcePtr _pDenoisingTexGlossyOut;
+
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+    /*** Differentiable Rendering Variables ***/
+    ID3D12PipelineStatePtr _pDiffRenderPipelineState;
+    ID3D12RootSignaturePtr _pDiffRenderRootSignature;
+    ID3D12ResourcePtr      _pDiffPathRecordsBuffer;  // gPathRecords UAV (u10)
+    ID3D12ResourcePtr      _pDiffMaterialGradsBuffer; // gMaterialGrads UAV (u11)
+    ID3D12ResourcePtr      _pDiffConstantsBuffer;    // gDiffRenderConstants cbuffer (b4)
+    uvec2                  _diffRenderDimensions;    // dimensions when buffers were last allocated
+    ID3D12ResourcePtr      _pDiffTargetTexture;      // gTargetImage SRV (t0, space2)
+    bool                   _hasDiffTargetImage = false; // true once setDiffTargetImage() is called
+#endif
+};
+
+// Creates (if needed) and an updates a GPU constant buffer with data supplied by the caller.
+template <typename DataType>
+void PTRenderer::updateBuffer(TransferBuffer& buffer, FillDataFunction<DataType> fillDataFunction)
+{
+    // Create a transfer buffer for the data if it doesn't already exist.
+    static const size_t BUFFER_SIZE = sizeof(DataType);
+    if (!buffer.valid())
+    {
+        buffer = createTransferBuffer(
+            BUFFER_SIZE, "updateBuffer:" + to_string(uint64(&fillDataFunction)));
+    }
+
+    // Fill the data using the callback function.
+    DataType data;
+    fillDataFunction(data);
+
+    // Copy the data to the constant buffer.
+    void* pMappedData = buffer.map();
+    ::memcpy_s(pMappedData, BUFFER_SIZE, &data, BUFFER_SIZE);
+    buffer.unmap();
+}
+
+MAKE_AURORA_PTR(PTRenderer);
+
+END_AURORA

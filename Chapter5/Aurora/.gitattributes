@@ -1,0 +1,27 @@
+###############################################################################
+# Set default behavior to automatically normalize line endings.
+###############################################################################
+* text=auto
+
+# Declare files that will always have LF line endings on checkout.
+*.patch text eol=lf
+
+###############################################################################
+# Binary file types. LFS filters removed: this copy of Aurora
+# stores real file content so the book repo needs no LFS setup.
+###############################################################################
+*.[Bb][Ii][Nn] -text
+*.[Dd][Oo][Cc][Xx] -text
+*.[Ee][Xx][Ee] -text
+*.[Ee][Xx][Rr] -text
+*.[Gg][Ll][Bb] -text
+*.[Gg][Ll][Tt][Ff] -text
+*.[Hh][Dd][Rr] -text
+*.[Ii][Cc][Oo] -text
+*.[Jj][Pp][Ee][Gg] -text
+*.[Jj][Pp][Gg] -text
+*.[Kk][Tt][Xx] -text
+*.[Pp][Nn][Gg] -text
+*.[Pp][Pp][Tt][Xx] -text
+*.[Rr][Cc] -text
+*.[Uu][Ss][Dd] -text
