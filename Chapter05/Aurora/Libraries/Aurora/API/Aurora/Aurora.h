@@ -1171,6 +1171,30 @@ public:
     // Render the current scene.
     virtual void render(uint32_t sampleStart = 0, uint32_t sampleCount = 1) = 0;
 
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+    /// Set the target image used to compute the rendering loss for differentiable rendering.
+    /// The image must match the current output dimensions (width × height, Float_RGBA or
+    /// Integer_RGBA). Calling this replaces any previously set target image.
+    /// Until this is called, the backward pass uses the rendered output itself as the target
+    /// (loss = 0, all gradients = 0).
+    virtual void setDiffTargetImage(const IImage::InitData& targetImage) = 0;
+
+    /// Read back the accumulated material gradients from the last render and reduce across pixels.
+    /// Returns a flat array of 15 floats: the mean over surface-hit pixels (pixels whose path
+    /// records contain at least one bounce; matches an alpha-masked image-space loss denominator):
+    ///   [0-2]  baseColor.xyz
+    ///   [3]    specularRoughness
+    ///   [4]    metalness
+    ///   [5-7]  emissionColor.xyz
+    ///   [8]    emission
+    ///   [9]    specular
+    ///   [10-12] specularColor.xyz
+    ///   [13]   specularIOR
+    ///   [14]   specularAnisotropy
+    /// Returns an empty vector if differentiable rendering is not active or no render has occurred.
+    virtual std::vector<float> getMaterialGradients() = 0;
+#endif
+
     // Wait for all the currently executing render tasks on the GPU to complete.
     virtual void waitForTask() = 0;
 

@@ -11,13 +11,14 @@ import math
 import platform
 
 # Dump usage and exit if we have incorrect number of args.
-if(len(sys.argv) < 3 or len(sys.argv) > 6):
-    print("Usage: python minifyShadersFolder.py inputFolder outputFile [slangCompiler] [mainEntryPoint] [slangTarget]")
+if(len(sys.argv) < 3 or len(sys.argv) > 7):
+    print("Usage: python minifyShadersFolder.py inputFolder outputFile [slangCompiler] [mainEntryPoint] [slangTarget] [extraDefines]")
     print("  inputFolder - Folder containing Slang files")
     print("  outputMinifiedFile - Output minified C++ header file")
     print("  slangCompiler - Folder for slang executable to compile main entryPoint file (if omitted, just minifies no compilation)")
-    print("  mainEntryPoint - Main entry point filename, also used for precompiled DXIL C++ header filename (if omitted, assumes MainEntryPoint)")
+    print("  mainEntryPoint - Main entry point filename, also used for precompiled DXIL C++ header filename (if omitted, assumes MainEntryPoints)")
     print("  slangTarget - Slangc compiling target (metal, dxil, spirv)")
+    print("  extraDefines - Space-separated list of KEY=VALUE preprocessor defines added to slangc (e.g. ENABLE_DIFFERENTIABLE_RENDERING=1)")
     sys.exit(-1)
 
 # Parse the command line arguments.
@@ -25,14 +26,17 @@ hlslFolder = sys.argv[1]
 outputFile = sys.argv[2]
 nameSpaceName = os.path.splitext(os.path.basename(outputFile))[0] # Default namespace is output filename without extension or path.
 slangc = ""
-if(len(sys.argv) == 4):
+if(len(sys.argv) >= 4):
     slangc = sys.argv[3]
 mainEntryPoint = "MainEntryPoints"
-if(len(sys.argv) == 5):
+if(len(sys.argv) >= 5):
     mainEntryPoint = sys.argv[4]
 target = ""
-if(len(sys.argv) == 6):
+if(len(sys.argv) >= 6):
     target = sys.argv[5]
+extraDefines = []
+if(len(sys.argv) >= 7 and len(sys.argv[6].strip()) > 0):
+    extraDefines = ["-D" + d for d in sys.argv[6].split()]
 
 # Build list of files
 files = glob.glob(hlslFolder + '/*.*sl*')
@@ -43,6 +47,16 @@ try:
     outputModTime = outfileStat.st_mtime
 except:
     outputModTime = 0
+
+# Also check the DiffComputeShaders header when differentiable rendering is enabled;
+# it is a secondary output that may be missing even though the primary header is current.
+if any("ENABLE_DIFFERENTIABLE_RENDERING" in d for d in extraDefines):
+    diffHeader = os.path.join(os.path.dirname(outputFile), "DiffComputeShaders.h")
+    try:
+        diffModTime = os.stat(diffHeader).st_mtime
+        outputModTime = min(outputModTime, diffModTime)
+    except:
+        outputModTime = 0
 
 # Compare the modified date on all the HLSL files in folder to output header file.
 numFiles = len(files)
@@ -86,19 +100,19 @@ if(len(slangc) > 0 and len(entryPointFile) > 0):
         print("Compiling main entry point %s with Slang compiler %s to MSL in header %s"%(entryPointFile, slangc, compiledFile))
         compiledTempFile = os.path.join(os.path.dirname(outputFile), metalFileName)
         variableName = "g_s" + mainEntryPoint + "metal"
-        cmd = [slangc, entryPointFile, "-target", target, "-o", compiledTempFile]
+        cmd = [slangc, entryPointFile, "-target", target, "-o", compiledTempFile] + extraDefines
     elif (target == "dxil"):
         compiledFile = os.path.dirname(outputFile) + "/" + mainEntryPoint + ".h"
         print("Compiling main entry point %s with Slang compiler %s to DXIL in header %s"%(entryPointFile, slangc, compiledFile))
         compiledTempFile = os.path.dirname(outputFile) +"/"+ mainEntryPoint + ".dxil"
         variableName = "g_s" + mainEntryPoint + "DXIL"
-        cmd = [slangc, entryPointFile, "-DDIRECTX=1", "-DENABLE_RUNTIME_COMPILE_EVALUATE_MATERIAL_FUNCTION=1", "-target", target, "-profile", "lib_6_3", "-o", compiledTempFile, "-dxc-path", os.environ.get('DXC_LIBRARY_DIR')]
+        cmd = [slangc, entryPointFile, "-DDIRECTX=1", "-DENABLE_RUNTIME_COMPILE_EVALUATE_MATERIAL_FUNCTION=1", "-target", target, "-profile", "lib_6_3", "-o", compiledTempFile, "-dxc-path", os.environ.get('DXC_LIBRARY_DIR')] + extraDefines
     else: # "spirv"
         compiledFile = os.path.dirname(outputFile) + "/" + mainEntryPoint + ".h"
         print("Compiling main entry point %s with Slang compiler %s to SPIRV in header %s"%(entryPointFile, slangc, compiledFile))
         compiledTempFile = os.path.dirname(outputFile) +"/"+ mainEntryPoint + ".spv"
         variableName = "g_s" + mainEntryPoint + "SPIRV"
-        cmd = [slangc, entryPointFile, "-target", "spirv", "-o", compiledTempFile]
+        cmd = [slangc, entryPointFile, "-target", "spirv", "-o", compiledTempFile] + extraDefines
 
     result = subprocess.run(cmd, capture_output=True)
     if(result.returncode != 0):
@@ -119,7 +133,39 @@ if(len(slangc) > 0 and len(entryPointFile) > 0):
             headerStr += "\n"
     headerStr += "};\n"
     with open(compiledFile, 'w') as f:
-        f.write(headerStr)    
+        f.write(headerStr)
+
+    # If ENABLE_DIFFERENTIABLE_RENDERING is in extraDefines, also compile DiffComputeShaders.slang
+    # with a compute profile (cs_6_6). Compute shaders cannot live in the lib_6_3 ray tracing library.
+    if any("ENABLE_DIFFERENTIABLE_RENDERING" in d for d in extraDefines):
+        diffComputeFile = os.path.join(os.path.dirname(entryPointFile), "DiffComputeShaders.slang")
+        if (target == "dxil"):
+            diffComputeDxil = os.path.join(os.path.dirname(outputFile), "DiffComputeShaders.dxil")
+            diffComputeHeader = os.path.join(os.path.dirname(outputFile), "DiffComputeShaders.h")
+            print("Compiling %s with Slang compiler %s to DXIL compute in header %s" % (diffComputeFile, slangc, diffComputeHeader))
+            cmdCompute = [slangc, diffComputeFile, "-DDIRECTX=1", "-target", "dxil", "-profile", "sm_6_6",
+                          "-entry", "GradientAccumShader", "-stage", "compute",
+                          "-o", diffComputeDxil, "-dxc-path", os.environ.get('DXC_LIBRARY_DIR')] + extraDefines
+            resultCompute = subprocess.run(cmdCompute, capture_output=True)
+            if(resultCompute.returncode != 0):
+                print("Compilation failed on " + diffComputeFile)
+                print(resultCompute.stderr.decode())
+                sys.exit(-1)
+            f = open(diffComputeDxil, mode = "rb")
+            data = bytearray(f.read())
+            numBytes = len(data)
+            numWords = math.ceil(numBytes / 4)
+            headerStr = "static const array<unsigned int, " + str(numWords) + "> g_sDiffComputeShadersDXIL = {\n"
+            for i in range(numWords):
+                wordBytes = bytes([data[i * 4 + 3],data[i * 4 + 2],data[i * 4 + 1],data[i * 4 + 0]])
+                headerStr += "0x" + str(wordBytes.hex())
+                if(i < numWords - 1):
+                    headerStr += ", "
+                if(i%8==7):
+                    headerStr += "\n"
+            headerStr += "};\n"
+            with open(diffComputeHeader, 'w') as f:
+                f.write(headerStr)
 
 
 print("Minifying %d files from %s" % (numFiles, hlslFolder))

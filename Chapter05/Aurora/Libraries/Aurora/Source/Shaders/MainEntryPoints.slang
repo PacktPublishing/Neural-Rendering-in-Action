@@ -39,6 +39,22 @@ RWTexture2D<float4> gBaseColorMetalness : register(u4);
 RWTexture2D<float4> gDiffuse : register(u5);
 RWTexture2D<float4> gGlossy : register(u6);
 
+
+#ifdef ENABLE_DIFFERENTIABLE_RENDERING
+#include "DiffRenderingConstants.slang"
+RWByteAddressBuffer         gPathRecords   : register(u10);
+RWByteAddressBuffer         gMaterialGrads : register(u11);
+Texture2D<float4>           gTargetImage   : register(t0, space2);
+
+cbuffer gDiffRenderConstants : register(b4)
+{
+    uint  gScreenWidth;
+    uint  gScreenHeight;
+    uint  gNumMaterials;
+    float _diffPad;
+}
+#endif // ENABLE_DIFFERENTIABLE_RENDERING
+
 // Results of the path tracing sample.
 struct Output
 {
@@ -91,6 +107,14 @@ void RayGenShader()
     uint2 screenSize = DispatchRaysDimensions().xy;
     uint2 screenCoords = DispatchRaysIndex().xy;
     uint sampleIndex = gSampleData.sampleIndex;
+
+#ifdef ENABLE_DIFFERENTIABLE_RENDERING
+    uint pixelIndex = screenCoords.y * screenSize.x + screenCoords.x;
+    uint diffBounceIdx = 0;
+    // Write header: numValidBounces = 0 initially.
+    uint diffPixelByteBase = pixelIndex * DIFF_PIXEL_TOTAL_STRIDE * 16;
+    gPathRecords.Store(diffPixelByteBase, asuint(0u));
+#endif // ENABLE_DIFFERENTIABLE_RENDERING
 
     // Initialize a random number generator, so that each sample and pixel gets a unique seed.
     Random rng = initRand(sampleIndex, screenSize, screenCoords);
@@ -303,6 +327,9 @@ void RayGenShader()
                         float3 directionalShadowRayDirection = 0;
                         float3 directionalLightColor = 0;
                         bool hasDirectionalLight = false;
+                        // Non-BSDF factor of the directional light contribution, recorded
+                        // for the backward pass (see DiffRenderingConstants.slang slot 12).
+                        float3 directionalLightScale = 0;
                         if (hitLayer)
                         {
                             // This ray struck opaque geometry, shade the collision as the next ray segment in the path.
@@ -336,7 +363,8 @@ void RayGenShader()
                                         gFrameData.lights.distantLights[lightIdx].direction,
                                         gFrameData.lights.distantLights[lightIdx].colorAndIntensity,
                                         gFrameData.lights.distantLights[lightIdx].cosRadius,
-                                        material, shading, V, rng, directionalShadowRayDirection);
+                                        material, shading, V, rng, directionalShadowRayDirection,
+                                        directionalLightScale);
                                     hasDirectionalLight = true;
                                 }
                             }
@@ -351,10 +379,15 @@ void RayGenShader()
                             float3 misLightResult = 0;
                             float3 misLightShadowRayDirection = 0;
 
+                            // The non-BSDF factors of the material-sampled MIS estimator
+                            // (weight * radiance / pdf), recorded for the backward pass.
+                            float3 misMaterialScale = 0;
+
                             // Shade with the environment light with multiple importance sampling.
                             shadeEnvironmentLightMIS(environment, material, shading, V, rng, misLobeID,
                                 misEmitsMaterialShadowRay, misMaterialResult, misMaterialShadowRayDirection,
-                                misEmitsLightShadowRay, misLightResult, misLightShadowRayDirection
+                                misEmitsLightShadowRay, misLightResult, misLightShadowRayDirection,
+                                misMaterialScale
                             );
 
                             // Scale the ray contribution (for this ray segment and subsequent ones) by the inverse of 
@@ -377,20 +410,29 @@ void RayGenShader()
 
                             // Trace shadow ray for directional light, if we have one.
                             float3 lightVisibility;
+                            // Visibility of the directional light's shadow ray specifically;
+                            // lightVisibility is reused by the MIS rays below.
+                            float3 dirLightVisibility = 0;
                             if (hasDirectionalLight)
                             {
                                 // Add directional result to the direct light.
                                 lightVisibility = traceShadowRay(gScene, shadowRayOrigin, directionalShadowRayDirection, M_RAY_TMIN, onlyOpaqueShadowHits, rayDepth, maxTraceDepth);
+                                dirLightVisibility = lightVisibility;
                                 direct += lightVisibility * directionalLightColor;
                             }
                             
                             // Trace shadow rays for material and light component of MIS environment (if we have them.)
+                            // Visibility of the material-sampled MIS shadow ray specifically.
+                            // lightVisibility below is reused across several rays, so the
+                            // backward pass needs this captured separately.
+                            float3 misMaterialVisibility = 0;
                             if (misEmitsLightShadowRay || misEmitsMaterialShadowRay)
                             {
                                 float3 misResult = 0;
                                 if (misEmitsMaterialShadowRay)
                                 {
                                     lightVisibility = traceShadowRay(gScene, shadowRayOrigin, misMaterialShadowRayDirection, M_RAY_TMIN, onlyOpaqueShadowHits, rayDepth, maxTraceDepth);
+                                    misMaterialVisibility = lightVisibility;
                                     misResult += lightVisibility * misMaterialResult;
                                 }
                                 if (misEmitsLightShadowRay)
@@ -413,6 +455,53 @@ void RayGenShader()
                                 }
 
                             }
+
+#ifdef ENABLE_DIFFERENTIABLE_RENDERING
+                            // Record this bounce for the backward pass.
+                            // TraceRay() is a DXR intrinsic unavailable in compute shaders,
+                            // so the forward pass must record everything the backward pass needs.
+                            if (diffBounceIdx < MAX_PATH_BOUNCES)
+                            {
+                                uint byteBase = diffPixelByteBase
+                                    + (DIFF_PIXEL_HEADER_SIZE + diffBounceIdx * DIFF_RECORD_STRIDE) * 16;
+                                float3 lightD = misEmitsMaterialShadowRay
+                                    ? misMaterialShadowRayDirection : float3(0.0f, 1.0f, 0.0f);
+                                // The complete non-BSDF factor of this bounce's MIS material
+                                // contribution: visibility * weight * radiance / pdf. The forward
+                                // pass contributed throughput * lightScale * bsdfAndCosine, so the
+                                // backward pass seeds bwd_diff(evaluateMaterial) with
+                                // lossGrad * throughput * lightScale to reconstruct the estimator.
+                                float3 lightScale = misEmitsMaterialShadowRay
+                                    ? misMaterialVisibility * misMaterialScale : float3(0.0f, 0.0f, 0.0f);
+                                gPathRecords.Store4(byteBase +  0*16, asuint(float4(material.baseColor, material.specularRoughness)));
+                                gPathRecords.Store4(byteBase +  1*16, asuint(float4(material.emissionColor, material.emission)));
+                                gPathRecords.Store4(byteBase +  2*16, asuint(float4(material.specularColor, material.specular)));
+                                gPathRecords.Store4(byteBase +  3*16, asuint(float4(material.specularIOR, material.specularAnisotropy, material.metalness, 1.0f)));
+                                gPathRecords.Store4(byteBase +  4*16, asuint(float4(shading.normal, 0.0f)));
+                                gPathRecords.Store4(byteBase +  5*16, asuint(float4(shading.tangent, 0.0f)));
+                                gPathRecords.Store4(byteBase +  6*16, asuint(float4(shading.bitangent, 0.0f)));
+                                gPathRecords.Store4(byteBase +  7*16, asuint(float4(V, 0.0f)));
+                                // .w flags whether a MIS material shadow ray was actually emitted.
+                                // When it was not, lightD is a placeholder direction that contributed
+                                // nothing to the image, and the backward pass must skip the BRDF term
+                                // rather than differentiate at a fabricated direction.
+                                gPathRecords.Store4(byteBase +  8*16, asuint(float4(lightD,
+                                    misEmitsMaterialShadowRay ? 1.0f : 0.0f)));
+                                gPathRecords.Store4(byteBase +  9*16, asuint(float4(lightScale, 0.0f)));
+                                gPathRecords.Store4(byteBase + 10*16, asuint(float4(rayContribution, 0.0f)));
+                                // Directional light: sampled direction plus its non-BSDF factor
+                                // (visibility * radiance). .w flags whether the light contributed.
+                                bool hasDirLight = hasDirectionalLight && !isBlack(directionalLightColor);
+                                gPathRecords.Store4(byteBase + 11*16, asuint(float4(
+                                    directionalShadowRayDirection, hasDirLight ? 1.0f : 0.0f)));
+                                gPathRecords.Store4(byteBase + 12*16, asuint(float4(
+                                    hasDirLight ? dirLightVisibility * directionalLightScale
+                                                : float3(0.0f, 0.0f, 0.0f), 0.0f)));
+                                diffBounceIdx++;
+                                // Update header with current bounce count.
+                                gPathRecords.Store(diffPixelByteBase, asuint(diffBounceIdx));
+                            }
+#endif // ENABLE_DIFFERENTIABLE_RENDERING
 
                             // If next ray not needed (as contribution is too small) terminate the path.
                             if (nextRayType == NO_SECONDARY_RAY)

@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include "BSDF.slang"
+#include "RayTrace.slang"
 
 // Compute shading from material emission.
+// [Differentiable]: gradients flow through emission, emissionColor, coat, coatColor.
+[Differentiable]
 float3 shadeEmission(Material material)
 {
     // Compute emission from the material properties. The emission is affected by the coat, i.e. the
@@ -27,8 +30,14 @@ float3 shadeEmission(Material material)
 // Compute shading with a directional light.
 float3 shadeDirectionalLight(float3 dir, float4 colorAndIntensity, float cosRadius,
     Material material, ShadingData shading, float3 V,
-    inout Random rng, out float3 shadowRayDirection)
+    inout Random rng, out float3 shadowRayDirection, out float3 lightScale)
 {
+    // The non-BSDF part of this light's contribution, i.e. everything in the returned
+    // radiance except bsdfAndCosine. The differentiable rendering backward pass
+    // differentiates the BSDF, so it must be seeded with the factors multiplying it.
+    // Zero whenever this light makes no contribution.
+    lightScale = float3(0.0f, 0.0f, 0.0f);
+
     // Perform shading with the global directional light. Treat the light as having a disc area by
     // sampling a random direction in a cone around the light direction.
     float2 random = random2D(rng);
@@ -47,6 +56,7 @@ float3 shadeDirectionalLight(float3 dir, float4 colorAndIntensity, float cosRadi
     // back side of the geometry, use the geometric position to avoid self-intersection.
     float3 lightRadiance = colorAndIntensity.a * colorAndIntensity.rgb;
     shadowRayDirection = L;
+    lightScale         = lightRadiance;
 
     // Compute the outgoing radiance as the BSDF (with cosine term) multipled by the light
     // visibility and radiance.
@@ -87,13 +97,21 @@ float3 shadeEnvironmentLightDirect(Environment environment,
 // Compute shading with an environment light using multiple importance sampling.
 void shadeEnvironmentLightMIS(Environment environment, Material material,
         ShadingData shading, float3 V,
-        inout Random rng, out int lobeID, 
-        out bool emitsMaterialShadowRay, inout float3 materialResult, inout float3 materialShadowRayDirection, 
-        out bool emitsLightShadowRay, inout float3 lightResult, inout float3 lightShadowRayDirection )
+        inout Random rng, out int lobeID,
+        out bool emitsMaterialShadowRay, inout float3 materialResult, inout float3 materialShadowRayDirection,
+        out bool emitsLightShadowRay, inout float3 lightResult, inout float3 lightShadowRayDirection,
+        out float3 materialScale )
 {
     // Set the emit flags to false.
     emitsMaterialShadowRay = false;
     emitsLightShadowRay = false;
+
+    // The non-BSDF part of the material-sampled MIS estimator, i.e. everything in
+    // materialResult except bsdfAndCosine. The differentiable rendering backward pass
+    // needs this to reconstruct the estimator: it differentiates the BSDF itself, so it
+    // must be seeded with the factors that multiply it. Zero unless a material shadow
+    // ray is emitted.
+    materialScale = float3(0.0f, 0.0f, 0.0f);
 
     // Generate random numbers for sampling.
     float2 random = random2D(rng);
@@ -142,8 +160,10 @@ void shadeEnvironmentLightMIS(Environment environment, Material material,
         // Add that to the prior weighted result.
         float weight = computeMISWeight(1, materialPDF, 1, lightPDF);
 
-        // Return the weighted result via the output parameter.
-        materialResult = weight * lightRadiance * bsdfAndCosine / materialPDF;
+        // Return the weighted result via the output parameter. Split out the non-BSDF
+        // factors so the backward pass can reuse them (see materialScale above).
+        materialScale  = weight * lightRadiance / materialPDF;
+        materialResult = materialScale * bsdfAndCosine;
 
         // Return the material shadow direction via the output parameter (the actual shadow ray will be emitted by the calling code.)
         materialShadowRayDirection = L;

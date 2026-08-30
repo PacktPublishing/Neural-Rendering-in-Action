@@ -1,21 +1,22 @@
 diff --git a/src/cmake/build_minizip-ng.cmake b/src/cmake/build_minizip-ng.cmake
-index c09e375fb..62d80a162 100644
+index c09e375fb..8a9e8a9e8 100644
 --- a/src/cmake/build_minizip-ng.cmake
 +++ b/src/cmake/build_minizip-ng.cmake
-@@ -17,6 +17,12 @@ set_cache (minizip-ng_BUILD_SHARED_LIBS OFF
+@@ -17,6 +17,13 @@ set_cache (minizip-ng_BUILD_SHARED_LIBS OFF
  checked_find_package (ZLIB REQUIRED)
  
  
++# Extract just the library directory from ZLIB_LIBRARIES for ZLIB_ROOT
 +if (ZLIB_LIBRARIES)
-+    string(REPLACE ";" "|" ZLIB_LIBRARIES_ESCAPED "${ZLIB_LIBRARIES}")
++    list(GET ZLIB_LIBRARIES 0 ZLIB_FIRST_LIB)
++    get_filename_component(ZLIB_LIB_DIR "${ZLIB_FIRST_LIB}" DIRECTORY)
++    get_filename_component(ZLIB_ROOT_FOR_MINIZIP "${ZLIB_LIB_DIR}" DIRECTORY)
 +endif()
-+if (ZLIB_INCLUDE_DIRS)
-+    string(REPLACE ";" "|" ZLIB_INCLUDE_DIRS_ESCAPED "${ZLIB_INCLUDE_DIRS}")
-+endif()
++
  build_dependency_with_cmake(minizip-ng
      VERSION         ${minizip-ng_BUILD_VERSION}
      GIT_REPOSITORY  ${minizip-ng_GIT_REPOSITORY}
-@@ -25,11 +31,6 @@ build_dependency_with_cmake(minizip-ng
+@@ -25,11 +32,7 @@ build_dependency_with_cmake(minizip-ng
          -D BUILD_SHARED_LIBS=${minizip-ng_BUILD_SHARED_LIBS}
          -D CMAKE_POSITION_INDEPENDENT_CODE=ON
          -D CMAKE_INSTALL_LIBDIR=lib
@@ -24,17 +25,16 @@ index c09e375fb..62d80a162 100644
 -        # install the headers under a subdirectory named "minizip-ng".
 -        # Note that this does not affect external builds for minizip-ng.
 -        -D CMAKE_INSTALL_INCLUDEDIR=${CMAKE_INSTALL_INCLUDEDIR}/minizip-ng
++        -D ZLIB_ROOT=${ZLIB_ROOT_FOR_MINIZIP}
          -D MZ_OPENSSL=OFF
          -D MZ_LIBBSD=OFF
          -D MZ_BUILD_TESTS=OFF
-@@ -45,8 +46,8 @@ build_dependency_with_cmake(minizip-ng
+@@ -45,8 +48,6 @@ build_dependency_with_cmake(minizip-ng
          -D MZ_ICONV=OFF
          -D MZ_FETCH_LIBS=OFF
          -D MZ_FORCE_FETCH_LIBS=OFF
 -        -D ZLIB_LIBRARY=${ZLIB_LIBRARIES}
 -        -D ZLIB_INCLUDE_DIR=${ZLIB_INCLUDE_DIRS}
-+        -D ZLIB_LIBRARY=${ZLIB_LIBRARIES_ESCAPED}
-+        -D ZLIB_INCLUDE_DIR=${ZLIB_INCLUDE_DIRS_ESCAPED}
      )
  
  
@@ -51,14 +51,15 @@ index 05cab6187..1de3b876a 100644
  
  set (yaml-cpp_ROOT ${yaml-cpp_LOCAL_INSTALL_DIR})
 diff --git a/src/cmake/dependency_utils.cmake b/src/cmake/dependency_utils.cmake
-index 0610da36c..144f9c606 100644
+index 0610da36c..7c8e8e8e8 100644
 --- a/src/cmake/dependency_utils.cmake
 +++ b/src/cmake/dependency_utils.cmake
 @@ -621,10 +621,19 @@ macro (build_dependency_with_cmake pkgname)
  
      # Make sure to inherit CMAKE_IGNORE_PATH
      set(_pkg_CMAKE_ARGS ${_pkg_CMAKE_ARGS} ${_pkg_CMAKE_ARGS})
-+    string(REPLACE "|" "\\;" _pkg_CMAKE_ARGS "${_pkg_CMAKE_ARGS}")
++    # Escape semicolons in CMAKE_ARGS to prevent them from being interpreted as list separators
++    string(REPLACE ";" "\\;" _pkg_CMAKE_ARGS "${_pkg_CMAKE_ARGS}")
      if (CMAKE_IGNORE_PATH)
          string(REPLACE ";" "\\;" CMAKE_IGNORE_PATH_ESCAPED "${CMAKE_IGNORE_PATH}")
          list(APPEND _pkg_CMAKE_ARGS "-DCMAKE_IGNORE_PATH=${CMAKE_IGNORE_PATH_ESCAPED}")

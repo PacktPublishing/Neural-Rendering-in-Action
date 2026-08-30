@@ -154,6 +154,14 @@ private:
 
     /*** Private Variables ***/
 
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+    void initDiffRendering();
+    void updateDiffRenderingResources();
+    void submitGradientAccum();
+    void setDiffTargetImage(const IImage::InitData& targetImage) override;
+    std::vector<float> getMaterialGradients() override;
+#endif
+
     unique_ptr<PTDevice> _pDevice;
     bool _isCommandListOpen = false;
     TransferBuffer _frameDataBuffer;
@@ -210,6 +218,18 @@ private:
     ID3D12ResourcePtr _pDenoisingTexGlossy;
     ID3D12ResourcePtr _pDenoisingTexDiffuseOut;
     ID3D12ResourcePtr _pDenoisingTexGlossyOut;
+
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+    /*** Differentiable Rendering Variables ***/
+    ID3D12PipelineStatePtr _pDiffRenderPipelineState;
+    ID3D12RootSignaturePtr _pDiffRenderRootSignature;
+    ID3D12ResourcePtr      _pDiffPathRecordsBuffer;  // gPathRecords UAV (u10)
+    ID3D12ResourcePtr      _pDiffMaterialGradsBuffer; // gMaterialGrads UAV (u11)
+    ID3D12ResourcePtr      _pDiffConstantsBuffer;    // gDiffRenderConstants cbuffer (b4)
+    uvec2                  _diffRenderDimensions;    // dimensions when buffers were last allocated
+    ID3D12ResourcePtr      _pDiffTargetTexture;      // gTargetImage SRV (t0, space2)
+    bool                   _hasDiffTargetImage = false; // true once setDiffTargetImage() is called
+#endif
 };
 
 // Creates (if needed) and an updates a GPU constant buffer with data supplied by the caller.

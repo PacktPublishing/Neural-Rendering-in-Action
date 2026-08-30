@@ -18,6 +18,9 @@
 #include "AssetManager.h"
 #include "CompiledShaders/Accumulation.hlsl.h"
 #include "CompiledShaders/PostProcessing.hlsl.h"
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+#include "CompiledShaders/DiffComputeShaders.h"
+#endif
 #include "MemoryPool.h"
 #include "PTDevice.h"
 #include "PTEnvironment.h"
@@ -52,13 +55,25 @@ BEGIN_AURORA
 // NOTE: This includes the output-related and denoising-related descriptors.
 static const uint32_t kOutputDescriptorCount    = 4;
 static const uint32_t kDenoisingDescriptorCount = 7;
-static const uint32_t kDescriptorCount = kOutputDescriptorCount + kDenoisingDescriptorCount;
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+// One extra SRV slot for gTargetImage (the diff rendering target image).
+static const uint32_t kDiffDescriptorCount = 1;
+#else
+static const uint32_t kDiffDescriptorCount = 0;
+#endif
+static const uint32_t kDescriptorCount =
+    kOutputDescriptorCount + kDenoisingDescriptorCount + kDiffDescriptorCount;
 
 // The offsets of output-related descriptors.
 static const int kFinalDescriptorOffset        = 0;
 static const int kAccumulationDescriptorOffset = 1;
 static const int kDirectDescriptorOffset       = 2;
 static const int kDepthNDCDescriptorsOffset    = 3;
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+// SRV for gTargetImage (t0, space2) — placed after all UAV descriptors.
+static const int kDiffTargetImageDescriptorOffset =
+    kOutputDescriptorCount + kDenoisingDescriptorCount; // = 11
+#endif
 
 PTRenderer::PTRenderer(uint32_t taskCount) : RendererBase(taskCount)
 {
@@ -82,6 +97,9 @@ PTRenderer::PTRenderer(uint32_t taskCount) : RendererBase(taskCount)
     // Initialize the accumulation and post-processing compute shaders.
     initAccumulation();
     initPostProcessing();
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+    initDiffRendering();
+#endif
 
     // Initialize the scratch buffer and vertex buffer pools. The function to create scratch buffers
     // uses unordered access, as required for BLAS/TLAS scratch buffers.
@@ -232,6 +250,28 @@ void PTRenderer::render(uint32_t sampleStart, uint32_t sampleCount)
         renderInternal(sampleStart, sampleCount);
 
 #if AU_DEV_CATCH_EXCEPTIONS_DURING_RENDERING
+    }
+    catch (HRException& e)
+    {
+        _isValid = false;
+        // Drain the D3D12 info queue to print the actual validation error message.
+        ComPtr<ID3D12InfoQueue> pInfoQueue;
+        if (_pDXDevice && SUCCEEDED(_pDXDevice.As(&pInfoQueue)))
+        {
+            UINT64 numMessages = pInfoQueue->GetNumStoredMessages();
+            for (UINT64 i = 0; i < numMessages; i++)
+            {
+                SIZE_T msgLen = 0;
+                pInfoQueue->GetMessage(i, nullptr, &msgLen);
+                vector<char> msgBuf(msgLen);
+                auto* pMsg = reinterpret_cast<D3D12_MESSAGE*>(msgBuf.data());
+                pInfoQueue->GetMessage(i, pMsg, &msgLen);
+                AU_ERROR("D3D12: [%d] %s", static_cast<int>(pMsg->Severity), pMsg->pDescription);
+            }
+            pInfoQueue->ClearStoredMessages();
+        }
+        AU_FAIL("Rendering has failed with HRESULT: %s (0x%08X)",
+            e.what(), static_cast<unsigned int>(e.error()));
     }
     catch (...)
     {
@@ -470,7 +510,27 @@ void PTRenderer::submitCommandList()
     _isCommandListOpen = false;
 
     // Close the command list and execute it on the command queue.
-    checkHR(_pCommandList->Close());
+    HRESULT hrClose = _pCommandList->Close();
+    if (FAILED(hrClose))
+    {
+        // Drain the D3D12 info queue to print the actual validation error.
+        ComPtr<ID3D12InfoQueue> pInfoQueue;
+        if (_pDXDevice && SUCCEEDED(_pDXDevice.As(&pInfoQueue)))
+        {
+            UINT64 numMessages = pInfoQueue->GetNumStoredMessages();
+            for (UINT64 i = 0; i < numMessages; i++)
+            {
+                SIZE_T msgLen = 0;
+                pInfoQueue->GetMessage(i, nullptr, &msgLen);
+                vector<char> msgBuf(msgLen);
+                auto* pMsg = reinterpret_cast<D3D12_MESSAGE*>(msgBuf.data());
+                pInfoQueue->GetMessage(i, pMsg, &msgLen);
+                AU_ERROR("D3D12 validation: [%d] %s",
+                    static_cast<int>(pMsg->Severity), pMsg->pDescription);
+            }
+        }
+        checkHR(hrClose);
+    }
     ID3D12CommandList* pCommandList = _pCommandList.Get();
     _pCommandQueue->ExecuteCommandLists(1, &pCommandList); // no HRESULT
 }
@@ -693,6 +753,334 @@ void PTRenderer::initPostProcessing()
         &desc, IID_PPV_ARGS(&_pPostProcessingPipelineState)));
 }
 
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+void PTRenderer::initDiffRendering()
+{
+    AU_INFO("DiffRender: initializing differentiable rendering pipeline.");
+    // Build the root signature explicitly in C++ to match the register bindings in
+    // DiffComputeShaders.slang. Slang does not embed root signatures into DXIL, so we cannot
+    // use CreateRootSignature from the bytecode as done for Accumulation/PostProcessing.
+    //
+    // Layout (must match DiffComputeShaders.slang):
+    //   Slot 0: descriptor table — gResult UAV (u0)
+    //   Slot 1: raw UAV root descriptor — gPathRecords (u10)
+    //   Slot 2: raw UAV root descriptor — gMaterialGrads (u11)
+    //   Slot 3: raw CBV root descriptor — gDiffRenderConstants (b4)
+    //   Slot 4: descriptor table — gTargetImage SRV (t0, space2)
+    CD3DX12_DESCRIPTOR_RANGE uavRange;
+    uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0); // u0: gResult
+
+    CD3DX12_DESCRIPTOR_RANGE srvRange;
+    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 2); // t0, space2: gTargetImage
+
+    array<CD3DX12_ROOT_PARAMETER, 5> params = {};
+    params[0].InitAsDescriptorTable(1, &uavRange);    // gResult (u0)
+    params[1].InitAsUnorderedAccessView(10);          // gPathRecords (u10)
+    params[2].InitAsUnorderedAccessView(11);          // gMaterialGrads (u11)
+    params[3].InitAsConstantBufferView(4);            // gDiffRenderConstants (b4)
+    params[4].InitAsDescriptorTable(1, &srvRange);    // gTargetImage (t0, space2)
+
+    CD3DX12_ROOT_SIGNATURE_DESC desc(
+        static_cast<UINT>(params.size()), params.data(), 0, nullptr);
+
+    ID3DBlobPtr pSignatureBlob;
+    ID3DBlobPtr pErrorBlob;
+    checkHR(::D3D12SerializeRootSignature(
+        &desc, D3D_ROOT_SIGNATURE_VERSION_1, &pSignatureBlob, &pErrorBlob));
+    checkHR(_pDXDevice->CreateRootSignature(0, pSignatureBlob->GetBufferPointer(),
+        pSignatureBlob->GetBufferSize(), IID_PPV_ARGS(&_pDiffRenderRootSignature)));
+    _pDiffRenderRootSignature->SetName(L"Diff Render Root Signature");
+
+    // Create the compute pipeline state for GradientAccumShader.
+    D3D12_SHADER_BYTECODE shaderByteCode =
+        CD3DX12_SHADER_BYTECODE(g_sDiffComputeShadersDXIL.data(),
+            g_sDiffComputeShadersDXIL.size() * sizeof(unsigned int));
+    D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+    psoDesc.CS             = shaderByteCode;
+    psoDesc.pRootSignature = _pDiffRenderRootSignature.Get();
+    checkHR(_pDXDevice->CreateComputePipelineState(
+        &psoDesc, IID_PPV_ARGS(&_pDiffRenderPipelineState)));
+}
+
+void PTRenderer::updateDiffRenderingResources()
+{
+    // Reallocate buffers only when the output dimensions change.
+    if (_diffRenderDimensions == _outputDimensions)
+    {
+        return;
+    }
+
+    // Flush the GPU before releasing old buffers.
+    if (_pDiffPathRecordsBuffer)
+    {
+        waitForTask();
+    }
+
+    _diffRenderDimensions = _outputDimensions;
+    uint32_t numPixels    = _outputDimensions.x * _outputDimensions.y;
+
+    // gPathRecords: per-pixel header (1 float4) + MAX_PATH_BOUNCES bounce records.
+    // Each bounce record is DIFF_RECORD_STRIDE (13) float4s.
+    // Total per pixel = (1 + 4*13) = 53 float4s = 848 bytes/pixel.
+    constexpr uint32_t kMaxPathBounces    = 4;  // must match MAX_PATH_BOUNCES in DiffRenderingConstants.slang
+    constexpr uint32_t kDiffRecordStride  = 13; // must match DIFF_RECORD_STRIDE
+    constexpr uint32_t kDiffPixelHeaderSize = 1; // must match DIFF_PIXEL_HEADER_SIZE
+    constexpr uint32_t kDiffPixelTotalStride =
+        kDiffPixelHeaderSize + kMaxPathBounces * kDiffRecordStride;
+    size_t pathRecordsSize =
+        static_cast<size_t>(numPixels) * kDiffPixelTotalStride * sizeof(float) * 4;
+    _pDiffPathRecordsBuffer = createBuffer(pathRecordsSize, "DiffRender PathRecords",
+        D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // Allocate gMaterialGrads UAV buffer (written by GradientAccumShader, read back by CPU).
+    // Layout: 16 floats per pixel (MATERIAL_GRAD_STRIDE = 16). Only 15 are
+    // meaningful; the stride is padded to 16 so each pixel's base is 16-byte
+    // aligned and GradientAccumShader can write it with four Store4 calls.
+    size_t materialGradsSize =
+        static_cast<size_t>(numPixels) * 16 * sizeof(float);
+    _pDiffMaterialGradsBuffer = createBuffer(materialGradsSize, "DiffRender MaterialGrads",
+        D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // Allocate the constants upload buffer (gDiffRenderConstants at b4).
+    // 4 uints/floats = 16 bytes; align to 256 bytes as required for CBVs.
+    size_t constBufferSize =
+        ALIGNED_SIZE(16, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+    _pDiffConstantsBuffer = createBuffer(constBufferSize, "DiffRender Constants",
+        D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE,
+        D3D12_RESOURCE_STATE_GENERIC_READ);
+
+    // Write the screen dimensions into the constants buffer (they don't change until resize).
+    struct DiffRenderConstants
+    {
+        uint32_t screenWidth;
+        uint32_t screenHeight;
+        uint32_t numMaterials;
+        float    pad;
+    };
+    DiffRenderConstants constants = { _outputDimensions.x, _outputDimensions.y, 1, 0.0f };
+    void* pMapped = nullptr;
+    checkHR(_pDiffConstantsBuffer->Map(0, nullptr, &pMapped));
+    ::memcpy_s(pMapped, sizeof(constants), &constants, sizeof(constants));
+    _pDiffConstantsBuffer->Unmap(0, nullptr);
+}
+
+void PTRenderer::setDiffTargetImage(const IImage::InitData& targetImage)
+{
+    AU_ASSERT(targetImage.pImageData && targetImage.width > 0 && targetImage.height > 0,
+        "setDiffTargetImage: invalid image data.");
+
+    // Wait for the GPU to be idle before releasing the old texture.
+    if (_pDiffTargetTexture)
+    {
+        waitForTask();
+    }
+
+    // Determine the DXGI format from the image format (no linearization — target is already linear).
+    DXGI_FORMAT dxFormat = PTImage::getDXFormat(targetImage.format, false);
+    uvec2 dims(targetImage.width, targetImage.height);
+
+    // Create the GPU texture in the default heap (copy-dest state initially).
+    _pDiffTargetTexture = createTexture(dims, dxFormat, "DiffRender TargetImage");
+
+    // Upload the pixel data via a temporary upload buffer.
+    size_t bytesPerPixel   = PTImage::getBytesPerPixel(targetImage.format);
+    size_t tempBufferSize  = ::GetRequiredIntermediateSize(_pDiffTargetTexture.Get(), 0, 1);
+    ID3D12ResourcePtr pTempBuffer = createBuffer(tempBufferSize);
+
+    D3D12_SUBRESOURCE_DATA textureData = {};
+    textureData.pData      = targetImage.pImageData;
+    textureData.RowPitch   = bytesPerPixel * dims.x;
+    textureData.SlicePitch = textureData.RowPitch * dims.y;
+
+    ID3D12GraphicsCommandList4Ptr pCommandList = beginCommandList();
+    ::UpdateSubresources(
+        pCommandList.Get(), _pDiffTargetTexture.Get(), pTempBuffer.Get(), 0, 0, 1, &textureData);
+
+    // Transition to PIXEL_SHADER_RESOURCE so the compute shader can sample it.
+    addTransitionBarrier(_pDiffTargetTexture.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    submitCommandList();
+    completeTask();
+    waitForTask();
+
+    // Write the SRV into the descriptor heap at the reserved diff-target slot.
+    // The descriptor heap is owned by PTScene and is valid as long as the scene is set.
+    // We write here (not in updateOutputResources) so the SRV is updated immediately on call,
+    // even mid-frame, and survives descriptor heap rebuilds via the _hasDiffTargetImage flag
+    // which causes updateOutputResources to re-write it.
+    if (_pDescriptorHeap)
+    {
+        CD3DX12_CPU_DESCRIPTOR_HANDLE handle(
+            _pDescriptorHeap->GetCPUDescriptorHandleForHeapStart(),
+            kDiffTargetImageDescriptorOffset, _handleIncrementSize);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format                  = dxFormat;
+        srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MipLevels     = UINT_MAX;
+        _pDXDevice->CreateShaderResourceView(_pDiffTargetTexture.Get(), &srvDesc, handle);
+    }
+
+    _hasDiffTargetImage = true;
+    AU_INFO("DiffRender: target image set (%ux%u).", dims.x, dims.y);
+}
+
+vector<float> PTRenderer::getMaterialGradients()
+{
+    // Return empty if no render has occurred or buffers are not allocated.
+    if (!_pDiffMaterialGradsBuffer || !_hasDiffTargetImage)
+    {
+        return {};
+    }
+
+    uint32_t numPixels = _outputDimensions.x * _outputDimensions.y;
+    // kGradStride is the padded GPU stride (MATERIAL_GRAD_STRIDE); kGradFields is
+    // the number of meaningful gradients. Slot [15] is padding and is skipped.
+    constexpr uint32_t kGradStride = 16;
+    constexpr uint32_t kGradFields = 15;
+    size_t gradsSize = static_cast<size_t>(numPixels) * kGradStride * sizeof(float);
+
+    // Wait for the GPU to finish the last render before reading back.
+    waitForTask();
+
+    // Create a readback buffer.
+    ID3D12ResourcePtr pReadbackBuf = createBuffer(gradsSize, "DiffGrad Readback CPU",
+        D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    // Copy gMaterialGrads to the readback buffer.
+    ID3D12GraphicsCommandList4Ptr pCopyList = beginCommandList();
+    addTransitionBarrier(_pDiffMaterialGradsBuffer.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    pCopyList->CopyBufferRegion(
+        pReadbackBuf.Get(), 0, _pDiffMaterialGradsBuffer.Get(), 0, gradsSize);
+    addTransitionBarrier(_pDiffMaterialGradsBuffer.Get(),
+        D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    submitCommandList();
+
+    // Wait for the copy to complete.
+    {
+        ComPtr<ID3D12Fence> pFence;
+        checkHR(_pDXDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&pFence)));
+        checkHR(_pCommandQueue->Signal(pFence.Get(), 1));
+        checkHR(pFence->SetEventOnCompletion(1, _hTaskEvent));
+        ::WaitForSingleObject(_hTaskEvent, INFINITE);
+    }
+
+    // Map and reduce: sum each of the 15 gradient fields across all pixels, then divide by
+    // the number of valid (hit) pixels to get the mean gradient.
+    void* pMapped = nullptr;
+    D3D12_RANGE readRange = { 0, gradsSize };
+    checkHR(pReadbackBuf->Map(0, &readRange, &pMapped));
+    const float* pGrads = reinterpret_cast<const float*>(pMapped);
+
+    vector<double> sums(kGradFields, 0.0);
+    uint32_t validPixels = 0;
+    for (uint32_t px = 0; px < numPixels; px++)
+    {
+        const float* pPixelGrads = pGrads + px * kGradStride;
+        // A pixel is valid if GradientAccumShader recorded a surface hit for it,
+        // signalled by the coverage flag in slot [15]. This includes surface pixels
+        // whose gradients are all zero (e.g. fully shadowed), so the mean here uses
+        // the same denominator as an alpha-masked image-space loss.
+        bool hasGrad = pPixelGrads[kGradFields] != 0.0f;
+        if (hasGrad)
+        {
+            validPixels++;
+            for (uint32_t f = 0; f < kGradFields; f++)
+            {
+                sums[f] += pPixelGrads[f];
+            }
+        }
+    }
+
+    D3D12_RANGE writeRange = { 0, 0 };
+    pReadbackBuf->Unmap(0, &writeRange);
+
+    // Return mean gradients (or zero if no valid pixels).
+    vector<float> result(kGradFields, 0.0f);
+    if (validPixels > 0)
+    {
+        for (uint32_t f = 0; f < kGradFields; f++)
+        {
+            result[f] = static_cast<float>(sums[f] / validPixels);
+        }
+    }
+    return result;
+}
+
+void PTRenderer::submitGradientAccum()
+{
+    // Begin a command list.
+    ID3D12GraphicsCommandList4Ptr pCommandList = beginCommandList();
+
+    // Barriers: wait for the accumulation shader to finish writing the accumulated image,
+    // and for RayGenShader to finish writing gPathRecords, before the gradient compute shader
+    // reads them.
+    addUAVBarrier(_pTexAccumulation.Get());
+    addUAVBarrier(_pDiffPathRecordsBuffer.Get());
+
+    // Set up the pipeline for the gradient accumulation compute shader.
+    pCommandList->SetDescriptorHeaps(1, _pDescriptorHeap.GetAddressOf());
+    pCommandList->SetComputeRootSignature(_pDiffRenderRootSignature.Get());
+    pCommandList->SetPipelineState(_pDiffRenderPipelineState.Get());
+
+    // Bind resources. Slot indices match the explicit [RootSignature] in DiffComputeShaders.slang:
+    //   Slot 0: descriptor table — gResult (UAV u0, the accumulated N-sample image)
+    //   Slot 1: raw UAV — gPathRecords (u10)
+    //   Slot 2: raw UAV — gMaterialGrads (u11)
+    //   Slot 3: CBV — gDiffRenderConstants (b4)
+    //   Slot 4: descriptor table — gTargetImage (SRV t0, space2); uses direct texture as
+    //           placeholder until a real target image is provided via the public API.
+
+    // Slot 0: gResult UAV — bind the accumulated (N-sample averaged) image so the
+    // loss gradient uses the fully-converged render, not a single noisy sample.
+    CD3DX12_GPU_DESCRIPTOR_HANDLE resultHandle(
+        _pDescriptorHeap->GetGPUDescriptorHandleForHeapStart(),
+        kAccumulationDescriptorOffset, _handleIncrementSize);
+    pCommandList->SetComputeRootDescriptorTable(0, resultHandle);
+
+    // Slot 1: gPathRecords UAV buffer (raw root descriptor).
+    pCommandList->SetComputeRootUnorderedAccessView(
+        1, _pDiffPathRecordsBuffer->GetGPUVirtualAddress());
+
+    // Slot 2: gMaterialGrads UAV buffer (raw root descriptor).
+    pCommandList->SetComputeRootUnorderedAccessView(
+        2, _pDiffMaterialGradsBuffer->GetGPUVirtualAddress());
+
+    // Slot 3: gDiffRenderConstants CBV.
+    pCommandList->SetComputeRootConstantBufferView(
+        3, _pDiffConstantsBuffer->GetGPUVirtualAddress());
+
+    // Slot 4: gTargetImage SRV — use the real target image if set, otherwise fall back to the
+    // direct texture (loss = 0, grads = 0) as a placeholder.
+    CD3DX12_GPU_DESCRIPTOR_HANDLE targetHandle;
+    if (_hasDiffTargetImage)
+    {
+        targetHandle = CD3DX12_GPU_DESCRIPTOR_HANDLE(
+            _pDescriptorHeap->GetGPUDescriptorHandleForHeapStart(),
+            kDiffTargetImageDescriptorOffset, _handleIncrementSize);
+    }
+    else
+    {
+        // Placeholder: bind the rendered output to itself so loss = 0.
+        targetHandle = resultHandle;
+    }
+    pCommandList->SetComputeRootDescriptorTable(4, targetHandle);
+
+    // Dispatch GradientAccumShader with [numthreads(8,8,1)].
+    constexpr uvec2 kThreadGroupCount(8, 8);
+    pCommandList->Dispatch(
+        (_outputDimensions.x + kThreadGroupCount.x - 1) / kThreadGroupCount.x,
+        (_outputDimensions.y + kThreadGroupCount.y - 1) / kThreadGroupCount.y, 1);
+
+    // Submit the command list.
+    submitCommandList();
+}
+#endif // ENABLE_DIFFERENTIABLE_RENDERING
+
 void PTRenderer::renderInternal(uint32_t sampleStart, uint32_t sampleCount)
 {
     assert(_pScene && _pTargetFinal);
@@ -754,6 +1142,9 @@ void PTRenderer::renderInternal(uint32_t sampleStart, uint32_t sampleCount)
     updateSceneResources();
     updateOutputResources();
     updateDenoisingResources();
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+    updateDiffRenderingResources();
+#endif
     _isDimensionsChanged     = false;
     _isDescriptorHeapChanged = false;
 
@@ -799,6 +1190,15 @@ void PTRenderer::renderInternal(uint32_t sampleStart, uint32_t sampleCount)
         // NOTE: This should not use the sample offset, as it needs to know how far along the
         // accumulation has proceeded.
         submitAccumulation(sampleStart + i);
+
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+        // Dispatch the backward pass (gradient accumulation) only on the LAST sample,
+        // AFTER accumulation. This way the gradient shader reads the fully-accumulated
+        // N-sample averaged image for lossGrad, matching what the CPU reads for FD.
+        // Path records are from the last sample (each sample overwrites).
+        if (i == sampleCount - 1)
+            submitGradientAccum();
+#endif
 
         // Complete the task here, because the denoiser itself only supports the same number of
         // tasks and uses one for each sample counter increment.
@@ -961,6 +1361,24 @@ void PTRenderer::updateOutputResources()
         createUAV(_pTexAccumulation.Get(), handle);
         createUAV(_pTexDirect.Get(), handle);
         createUAV(_pTexDepthNDC.Get(), handle);
+
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+        // Re-write the diff target image SRV into the reserved slot whenever the descriptor heap
+        // is rebuilt (scene change) or output textures are recreated.
+        if (_hasDiffTargetImage && _pDiffTargetTexture)
+        {
+            CD3DX12_CPU_DESCRIPTOR_HANDLE diffTargetHandle(
+                _pDescriptorHeap->GetCPUDescriptorHandleForHeapStart(),
+                kDiffTargetImageDescriptorOffset, _handleIncrementSize);
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srvDesc.Format                  = _pDiffTargetTexture->GetDesc().Format;
+            srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Texture2D.MipLevels     = UINT_MAX;
+            _pDXDevice->CreateShaderResourceView(
+                _pDiffTargetTexture.Get(), &srvDesc, diffTargetHandle);
+        }
+#endif
     }
 }
 
@@ -1213,6 +1631,23 @@ void PTRenderer::submitRayDispatch(
         CD3DX12_GPU_DESCRIPTOR_HANDLE samplerHandle(
             _pSamplerDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
         pCommandList->SetComputeRootDescriptorTable(13, samplerHandle);
+
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+        // 14) gPathRecords UAV buffer (written by RayGenShader, read by GradientAccumShader).
+        if (_pDiffPathRecordsBuffer)
+            pCommandList->SetComputeRootUnorderedAccessView(
+                14, _pDiffPathRecordsBuffer->GetGPUVirtualAddress());
+
+        // 15) gMaterialGrads UAV buffer (written by GradientAccumShader, read back by CPU).
+        if (_pDiffMaterialGradsBuffer)
+            pCommandList->SetComputeRootUnorderedAccessView(
+                15, _pDiffMaterialGradsBuffer->GetGPUVirtualAddress());
+
+        // 16) gDiffRenderConstants constant buffer (screen dimensions, etc.).
+        if (_pDiffConstantsBuffer)
+            pCommandList->SetComputeRootConstantBufferView(
+                16, _pDiffConstantsBuffer->GetGPUVirtualAddress());
+#endif
     }
 
     // Launch the ray generation shader with the dispatch, which performs path tracing.

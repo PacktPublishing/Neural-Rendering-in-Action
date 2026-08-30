@@ -614,8 +614,23 @@ OIIO_PACKAGE_NAME = "OpenImageIO"
 
 def InstallOpenImageIO(context, force, buildArgs):
     with CurrentWorkingDirectory(DownloadURL(OIIO_URL, context, force)):
-        ApplyGitPatch(context, "OpenImageIO.v3.0.7.0.patch")
-
+        # Apply patches to fix build issues
+        # Patch 1: build_minizip-ng.cmake - remove ZLIB_LIBRARY/ZLIB_INCLUDE_DIR and add ZLIB_ROOT
+        PatchFile("src/cmake/build_minizip-ng.cmake", [
+            ("checked_find_package (ZLIB REQUIRED)\n\n\nbuild_dependency_with_cmake(minizip-ng",
+             "checked_find_package (ZLIB REQUIRED)\n\n\n# Extract just the library directory from ZLIB_LIBRARIES for ZLIB_ROOT\nif (ZLIB_LIBRARIES)\n    list(GET ZLIB_LIBRARIES 0 ZLIB_FIRST_LIB)\n    get_filename_component(ZLIB_LIB_DIR \"${ZLIB_FIRST_LIB}\" DIRECTORY)\n    get_filename_component(ZLIB_ROOT_FOR_MINIZIP \"${ZLIB_LIB_DIR}\" DIRECTORY)\nendif()\n\nbuild_dependency_with_cmake(minizip-ng"),
+            ("        -D CMAKE_INSTALL_LIBDIR=lib\n        # Since the other modules create a subfolder for the includes by default and since\n        # minizip-ng does not, a suffix is added to CMAKE_INSTALL_INCLUDEDIR in order to\n        # install the headers under a subdirectory named \"minizip-ng\".\n        # Note that this does not affect external builds for minizip-ng.\n        -D CMAKE_INSTALL_INCLUDEDIR=${CMAKE_INSTALL_INCLUDEDIR}/minizip-ng\n        -D MZ_OPENSSL=OFF",
+             "        -D CMAKE_INSTALL_LIBDIR=lib\n        -D ZLIB_ROOT=${ZLIB_ROOT_FOR_MINIZIP}\n        -D MZ_OPENSSL=OFF"),
+            ("        -D MZ_FORCE_FETCH_LIBS=OFF\n        -D ZLIB_LIBRARY=${ZLIB_LIBRARIES}\n        -D ZLIB_INCLUDE_DIR=${ZLIB_INCLUDE_DIRS}\n    )",
+             "        -D MZ_FORCE_FETCH_LIBS=OFF\n    )")
+        ], multiLineMatches=True)
+        
+        # Patch 2: build_yaml-cpp.cmake - add CMAKE_POLICY_VERSION_MINIMUM
+        PatchFile("src/cmake/build_yaml-cpp.cmake", [
+            ("        -D CMAKE_INSTALL_LIBDIR=lib\n    )",
+             "        -D CMAKE_INSTALL_LIBDIR=lib\n        -D CMAKE_POLICY_VERSION_MINIMUM=3.5\n    )")
+        ], multiLineMatches=True)
+        
         extraArgs = ['-DOIIO_BUILD_TOOLS=OFF',
                      '-DOIIO_BUILD_TESTS=OFF',
                      '-DBUILD_DOCS=OFF',
@@ -791,6 +806,22 @@ def InstallUSD(context, force, buildArgs):
                             .format(pyIncPath=pythonInfo[2]))
             extraArgs.append('-DPXR_USE_DEBUG_PYTHON=OFF')
             
+            # USD also uses find_package(Python3) which uses different
+            # variables than the legacy FindPythonLibs.cmake. Pass the
+            # Python3_* variables so CMake doesn't pick up a different
+            # Python installation from the registry or PATH.
+            extraArgs.append('-DPython3_EXECUTABLE="{pyExecPath}"'
+                            .format(pyExecPath=pythonInfo[0]))
+            extraArgs.append('-DPython3_LIBRARY="{pyLibPath}"'
+                            .format(pyLibPath=pythonInfo[1]))
+            extraArgs.append('-DPython3_INCLUDE_DIR="{pyIncPath}"'
+                            .format(pyIncPath=pythonInfo[2]))
+            # Derive the root dir from the executable path so CMake's
+            # Python3 finder doesn't search elsewhere.
+            pyRootDir = os.path.dirname(pythonInfo[0])
+            extraArgs.append('-DPython3_ROOT_DIR="{pyRootDir}"'
+                            .format(pyRootDir=pyRootDir))
+            
 
         extraArgs.append('-DPXR_BUILD_ALEMBIC_PLUGIN=OFF')
         extraArgs.append('-DPXR_BUILD_DRACO_PLUGIN=OFF')
@@ -846,16 +877,16 @@ DXC = Dependency(DXC_INSTALL_FOLDER, DXC_PACKAGE_NAME, InstallDXC, DXC_URL, "bin
 # Slang
 
 if Windows():
-    Slang_URL = "https://github.com/shader-slang/slang/releases/download/v2025.12.1/slang-2025.12.1-windows-x86_64.zip"
+    Slang_URL = "https://github.com/shader-slang/slang/releases/download/v2025.23.2/slang-2025.23.2-windows-x86_64.zip"
 elif MacOS():
-    Slang_URL = "https://github.com/shader-slang/slang/releases/download/v2025.12.1/slang-2025.12.1-macos-aarch64.zip"
+    Slang_URL = "https://github.com/shader-slang/slang/releases/download/v2025.23.2/slang-2025.23.2-macos-aarch64.zip"
 else:
-    Slang_URL = "https://github.com/shader-slang/slang/releases/download/v2025.12.1/slang-2025.12.1-linux-x86_64.zip"
+    Slang_URL = "https://github.com/shader-slang/slang/releases/download/v2025.23.2/slang-2025.23.2-linux-x86_64.zip"
 Slang_INSTALL_FOLDER = "Slang"
 Slang_PACKAGE_NAME = "Slang"
 
 def InstallSlang(context, force, buildArgs):
-    Slang_SRC_FOLDER = DownloadURL(Slang_URL, context, force, destDir="Slang-2025.12.1")
+    Slang_SRC_FOLDER = DownloadURL(Slang_URL, context, force, destDir="Slang-2025.23.2")
     # Resolve Linux permission denied error.
     if Linux():
         with CurrentWorkingDirectory(Slang_SRC_FOLDER):

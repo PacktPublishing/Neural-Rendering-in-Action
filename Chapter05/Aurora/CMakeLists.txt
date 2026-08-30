@@ -74,6 +74,7 @@ else()
     set(ENABLE_TESTS OFF)
 endif()
 option(ENABLE_APPLICATIONS "Build Applications" ON)
+option(ENABLE_DIFFERENTIABLE_RENDERING "Enable differentiable rendering via Slang AD (adds GradientAccumShader and path recording to the ray gen shader)" ON)
 
 # Import the cmake utility functions
 include(toolbox)
@@ -84,6 +85,12 @@ endif()
 
 # The default compile definition used by all packages.
 set(DEFAULT_COMPILE_DEFINITIONS NOMINMAX UNICODE _USE_MATH_DEFINES _HAS_STD_BYTE=0)
+
+# Propagate the differentiable rendering option to C++ as a preprocessor define,
+# so that #if defined(ENABLE_DIFFERENTIABLE_RENDERING) guards in PTRenderer.cpp/.h work.
+if(ENABLE_DIFFERENTIABLE_RENDERING)
+    list(APPEND DEFAULT_COMPILE_DEFINITIONS ENABLE_DIFFERENTIABLE_RENDERING=1)
+endif()
 
 # Enable folders for project code organisation in IDE.
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
