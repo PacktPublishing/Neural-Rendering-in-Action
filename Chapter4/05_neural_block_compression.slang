@@ -53,16 +53,16 @@ struct NetworkParameters<int Inputs, int Outputs>
     AtomicTensor<float, 2> weights_grad;
 
     [Differentiable]
-    float get_bias(int neuron) { return biases.get({neuron}); }
+    float get_bias(int neuron) { return biases.load(neuron); }
 
     [Differentiable]
-    float get_weight(int neuron, int input) { return weights.get({neuron, input}); }
+    float get_weight(int neuron, int input) { return weights.load(neuron, input); }
 
     [BackwardDerivativeOf(get_bias)]
-    void get_bias_bwd(int neuron, float grad) { biases_grad.set({neuron}, grad); }
+    void get_bias_bwd(int neuron, float grad) { biases_grad.add(neuron, grad); }
 
     [BackwardDerivativeOf(get_weight)]
-    void get_weight_bwd(int neuron, int input, float grad) { weights_grad.set({neuron, input}, grad); }
+    void get_weight_bwd(int neuron, int input, float grad) { weights_grad.add(neuron, input, grad); }
 
     [Differentiable]
     float[Outputs] forward(float[Inputs] x)
@@ -89,7 +89,7 @@ struct LatentTexture<int NumLatents>
     [BackwardDerivative(get_latent_bwd)]
     float get_latent(int x, int y, int c) { return texture[y, x, c]; }
 
-    void get_latent_bwd(int x, int y, int c, float g) { texture_grads.set({y, x, c}, g); }
+    void get_latent_bwd(int x, int y, int c, float g) { texture_grads.add(y, x, c, g); }
 
     [Differentiable]
     float[NumLatents] sample(no_diff inout float2 uv)
@@ -183,16 +183,20 @@ float3 loss(int2 pixel, int2 resolution, no_diff float3 albedo_ref, Network netw
 }
 
 // ---------------------------------------------------------------------------
-// Training loss: all PBR channels packed into float3 (matches 05 bwd_diff pattern)
+// Training loss: one squared error per network output (all 6 channels)
 //   albedo_ref   = (R, G, B) linear
 //   material_ref = (normal_x, normal_y, roughness) in [0,1]
 //
-// Pairs of channel errors are summed into each float3 component so that the
-// single 1.0f seed gradient weights all channels equally.
+// An earlier version packed two independent squared errors into each float3
+// component (to fit all 6 channels' worth of loss into a float3 return type).
+// That pattern triggered a backend-specific Slang autodiff codegen issue that
+// hung the GPU indefinitely on some D3D12 driver/hardware combinations, even
+// at trivial batch sizes. Returning one term per output side-steps it, and
+// is mathematically identical (same 6 independent squared-error terms).
 // ---------------------------------------------------------------------------
 
 [Differentiable]
-float3 training_loss(int2 pixel, int2 resolution,
+float[6] training_loss(int2 pixel, int2 resolution,
                      no_diff float3 albedo_ref,
                      no_diff float3 material_ref,
                      Network network)
@@ -206,9 +210,14 @@ float3 training_loss(int2 pixel, int2 resolution,
     float  ne1 = out[4] - material_ref.y;
     float  re  = out[5] - material_ref.z;
 
-    return float3(ae.x * ae.x + ne0 * ne0,
-                  ae.y * ae.y + ne1 * ne1,
-                  ae.z * ae.z + re  * re);
+    float result[6];
+    result[0] = ae.x * ae.x;
+    result[1] = ae.y * ae.y;
+    result[2] = ae.z * ae.z;
+    result[3] = ne0 * ne0;
+    result[4] = ne1 * ne1;
+    result[5] = re  * re;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,8 +266,9 @@ void calculate_grads(uint seed, int2 batch_index, int2 batch_size,
     int2 res   = {albedo_ref.shape[1], albedo_ref.shape[0]};
     int2 pixel = int2(uv * float2(res));
 
-    float3 ref_albedo   = albedo_ref.getv(pixel);
-    float3 ref_material = material_ref.getv(pixel);
+    float3 ref_albedo   = albedo_ref.load(pixel);
+    float3 ref_material = material_ref.load(pixel);
 
-    bwd_diff(training_loss)(pixel, res, ref_albedo, ref_material, network, 1.0f);
+    float seed6[6] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    bwd_diff(training_loss)(pixel, res, ref_albedo, ref_material, network, seed6);
 }
