@@ -72,7 +72,14 @@ if not material_path.exists():
 # Load reference textures as Tensor<float3, 2> (compatible with blit + Slang)
 # ---------------------------------------------------------------------------
 
-app    = App(width=512 * 4 + 10 * 3, height=512,
+# 5 panels side by side at 512px each (plus gaps) would need a 2600px-wide
+# window, wider than a single 1920px-wide display can show — the OS then
+# clamps the window and the rightmost panel(s) render off-screen. 320px
+# keeps the whole row comfortably inside a 1920x1080 screen.
+PANEL = 320
+GAP   = 10
+
+app    = App(width=PANEL * 5 + GAP * 4, height=PANEL,
              title="Neural Block Compression — metal PBR set")
 module = spy.Module.load_from_file(app.device, "05_neural_block_compression.slang")
 
@@ -139,6 +146,49 @@ class Network(spy.InstanceList):
 network = Network()
 
 # ---------------------------------------------------------------------------
+# Shader warm-up
+#
+# Every module.xxx() kernel is JIT-compiled by Slang the first time it's called.
+# Without this warm-up, that one-time compile happens *inside* the very first
+# call to app.present(), which is the point where the GPU is first forced to
+# flush and synchronize everything queued so far (all render/train kernels for
+# that frame) against the swapchain. On some GPU/driver combinations, bundling
+# "compile every kernel for the first time" + "run a full frame" + "present"
+# into a single synchronized unit takes long enough to trip Windows' TDR
+# (Timeout Detection and Recovery) watchdog, which then kills the GPU device —
+# even though every later frame would have been fast.
+#
+# Fix: compile every kernel once, at trivial size, on a disposable network,
+# and explicitly wait for the GPU before the real loop (and its first present)
+# ever starts. This keeps compilation off the present-timed critical path.
+# ---------------------------------------------------------------------------
+print("Warming up shaders (one-time compile)... this may take a while")
+
+_warmup_network = Network()  # throwaway — never touches the real `network`'s weights
+_warmup_res = spy.int2(1, 1)
+_warmup_out = spy.Tensor.empty(app.device, (1, 1), "float3")
+
+module.render_albedo(pixel=spy.call_id(), resolution=_warmup_res,
+                     network=_warmup_network, _result=_warmup_out)
+module.render_normal(pixel=spy.call_id(), resolution=_warmup_res,
+                     network=_warmup_network, _result=_warmup_out)
+module.loss(pixel=spy.call_id(), resolution=_warmup_res,
+            albedo_ref=albedo, network=_warmup_network, _result=_warmup_out)
+module.calculate_grads(
+    seed=spy.wang_hash(seed=0, warmup=2),
+    batch_index=spy.grid((1, 1)),
+    batch_size=spy.int2(1, 1),
+    albedo_ref=albedo,
+    material_ref=material,
+    network=_warmup_network,
+)
+_warmup_network.optimize(0.0, 1)  # lr=0.0 -> compiles optimizer_step without changing anything
+app.device.wait()                 # block here, not at the first real present()
+
+del _warmup_network, _warmup_res, _warmup_out
+print("Warm-up complete.")
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
@@ -146,10 +196,36 @@ optimize_counter = 0
 LEARNING_RATE    = 0.001
 ITERS_PER_FRAME  = 20
 BATCH_SIZE       = (64, 64)
-PANEL            = 512
-GAP              = 10
+# Reconstruction error is only a few percent, so we amplify it for display.
+# Raise this if panel 5 still looks mostly black, lower it if it's all red.
+DIFF_GAIN        = 15.0
 
 res = spy.int2(*TEXTURE_SIZE)
+
+# Reference albedo in gamma space, cached once — used every frame to build the
+# amplified diff panel on the CPU (no extra GPU kernel needed for that).
+albedo_ref_srgb = np.clip(albedo.to_numpy(), 0.0, 1.0) ** (1.0 / 2.2)
+
+
+def _amplified_diff_panel(neural_albedo: "spy.Tensor") -> "spy.Tensor":
+    """Amplified, heatmapped albedo error, computed in NumPy from tensors we
+    already have on hand. Deliberately avoids adding a new GPU shader kernel —
+    this panel is purely a display aid, not part of the render/train pipeline."""
+    decoded_srgb = np.clip(neural_albedo.to_numpy(), 0.0, 1.0) ** (1.0 / 2.2)
+    mag = np.abs(decoded_srgb - albedo_ref_srgb).max(axis=-1)   # worst channel
+    t = np.clip(mag * DIFF_GAIN, 0.0, 1.0)
+
+    # Black -> blue -> green -> yellow -> red heatmap
+    stops  = np.array([0.00, 0.25, 0.50, 0.75, 1.00], dtype=np.float32)
+    colors = np.array([[0, 0, 0], [0, 0, 1], [0, 1, 0], [1, 1, 0], [1, 0, 0]], dtype=np.float32)
+    idx  = np.clip(np.searchsorted(stops, t, side="right") - 1, 0, len(stops) - 2)
+    frac = ((t - stops[idx]) / (stops[idx + 1] - stops[idx]))[..., None]
+    heat = colors[idx] + (colors[idx + 1] - colors[idx]) * frac
+
+    # Build as Tensor<float3, 2> (like `albedo`), not a plain 3D float tensor.
+    result = spy.Tensor.empty(app.device, heat.shape[:2], "float3")
+    result.copy_from_numpy(np.ascontiguousarray(heat.astype(np.float32)))
+    return result
 
 # ---------------------------------------------------------------------------
 # Compression ratio
@@ -168,7 +244,7 @@ compressed_bytes   = latent_bytes + weight_bytes
 compression_ratio  = uncompressed_bytes / compressed_bytes
 
 print("Compiling shaders... this may take a while")
-print("Panels: [ref albedo] [neural albedo] [ref normal] [neural normal]")
+print("Panels: [ref albedo] [neural albedo] [ref normal] [neural normal] [amplified albedo diff]")
 print()
 print(f"  Uncompressed : {uncompressed_bytes:>8,} bytes  ({uncompressed_bytes/1024:.1f} KB)")
 print(f"  Latent tex   : {latent_bytes:>8,} bytes  ({latent_bytes/1024:.1f} KB)  [{LATENT_W}x{LATENT_H} x {NUM_LATENTS}ch]")
@@ -192,7 +268,9 @@ while app.process_events():
     module.loss(pixel=spy.call_id(), resolution=res,
                 albedo_ref=albedo, network=network, _result=loss_out)
 
-    # ---- Blit four panels ----
+    diff_vis = _amplified_diff_panel(neural_albedo)
+
+    # ---- Blit five panels ----
     offset = 0
     # Panel 1: reference albedo
     app.blit(albedo,        size=spy.int2(PANEL), offset=spy.int2(offset, 0),
@@ -208,6 +286,10 @@ while app.process_events():
     offset += PANEL + GAP
     # Panel 4: neural-decoded normal map
     app.blit(neural_normal, size=spy.int2(PANEL), offset=spy.int2(offset, 0),
+             tonemap=False, bilinear=True)
+    offset += PANEL + GAP
+    # Panel 5: amplified, heatmapped albedo error (black/blue = match, red = high error)
+    app.blit(diff_vis,      size=spy.int2(PANEL), offset=spy.int2(offset, 0),
              tonemap=False, bilinear=True)
 
     # ---- Training ----

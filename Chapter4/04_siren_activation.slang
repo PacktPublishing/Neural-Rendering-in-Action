@@ -19,24 +19,24 @@ struct NetworkParameters<int Inputs, int Outputs>
     [Differentiable]
     float get_bias(int neuron)
     {
-        return biases.get({neuron});
+        return biases.load(neuron);
     }
     [Differentiable]
     float get_weight(int neuron, int input)
     {
-        return weights.get({neuron, input});
+        return weights.load(neuron, input);
     }
 
     [BackwardDerivativeOf(get_bias)]
     void get_bias_bwd(int neuron, float grad)
     {
-        biases_grad.set({neuron}, grad);
+        biases_grad.add(neuron, grad);
     }
 
     [BackwardDerivativeOf(get_weight)]
     void get_weight_bwd(int neuron, int input, float grad)
     {
-        weights_grad.set({neuron, input}, grad);
+        weights_grad.add(neuron, input, grad);
     }
 
     // Evaluate all neurons in the layer (linear part only; activation applied in Network.eval)
@@ -151,6 +151,6 @@ void calculate_grads(uint seed, int2 batch_index, int2 batch_size, Tensor<float3
     float2 uv = (batch_index + float2(lcg.next_float(), lcg.next_float())) / float2(batch_size);
     int2 resolution = {reference.shape[1], reference.shape[0]};
     int2 pixel = int2(uv * float2(resolution));
-    float3 reference_color = reference.getv(pixel);
+    float3 reference_color = reference.load(pixel);
     bwd_diff(loss)(pixel, resolution, reference_color, network, 1.0f);
 }

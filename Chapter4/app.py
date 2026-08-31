@@ -11,7 +11,7 @@ class App:
         title: str = "Forward Rasterizer Example",
         width: int = 1024,
         height: int = 1024,
-        device_type: spy.DeviceType = spy.DeviceType.automatic,
+        device_type: spy.DeviceType = spy.DeviceType.vulkan,
     ):
         super().__init__()
 
