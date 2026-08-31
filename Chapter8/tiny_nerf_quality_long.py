@@ -27,7 +27,7 @@ TINY_NERF_URL = "http://cseweb.ucsd.edu/~viscomp/projects/LF/papers/ECCV20/nerf/
 TINY_QUALITY_LONG_CONFIG = {
     "dataset_type": "tiny",
     "seed": 7,
-    "width": 128,
+    "width": 256,
     "depth": 8,
     "skip": 4,
     "pos_freqs": 10,
@@ -301,10 +301,10 @@ def render_rays(
     coarse_fn,
     fine_fn=None,
     n_coarse: int = 64,
-    n_fine: int = 128,
+    n_fine: int = 64,
     perturb: bool = True,
     raw_noise_std: float = 0.0,
-    white_bkgd: bool = True,
+    white_bkgd: bool = False,
     chunk: int = 32768,
 ):
     R = rays_o.shape[0]
