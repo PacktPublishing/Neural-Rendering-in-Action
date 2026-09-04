@@ -7,7 +7,7 @@ from pathlib import Path
 
 # Create the app and load the slang module.
 app = App(width=512 * 3 + 10 * 2, height=512, title="Simple MLP with Latent Texture")
-module = spy.Module.load_from_file(app.device, "03_latent_texture.slang")
+module = spy.Module.load_from_file(app.device, "04_latent_texture.slang")
 
 # Load some materials.
 data_path = Path(__file__).parent

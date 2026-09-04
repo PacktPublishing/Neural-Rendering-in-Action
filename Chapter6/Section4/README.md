@@ -82,3 +82,52 @@ property of the query, not the representation.
 - Speed: ~1-2 min/model for 1500 steps in NumPy; seconds in PyTorch on GPU.
 - Denormal floats: trained weights accumulate subnormal values that hit a slow
   CPU path; CoordinateMLP.load flushes them.
+
+## `neural_occupancy.py` — the SlangPy port
+
+`neural_occupancy.py` is a separate, self-contained file ("the whole of
+Section 4 in one file" per its own docstring) that the chapter text quotes
+directly. Its MLP forward/backward pass and Adam optimizer now run on the
+GPU via SlangPy (`neural_occupancy.slang`), using the same
+`NetworkParameters` pattern as Chapter 4, instead of the hand-rolled NumPy
+backprop the section originally used; the geometry, sampling, marching
+cubes, and plotting stay in NumPy/scikit-image/matplotlib. This does *not*
+touch `field4.py` / `train_one.py` / `run_figures.py` / `run_section4.py`
+above, which are a separate, more instrumented pipeline (checkpoints, the
+IoU/Chamfer table, bunny support) and still use their own NumPy backprop.
+
+```
+pip install slangpy scikit-image matplotlib
+python neural_occupancy.py [steps=1500] [L=6]
+```
+
+Tested with slangpy 0.43.1 on the Vulkan backend, Python 3.11. Notable
+differences from the NumPy version, and why -- worth reading if you touch
+this file:
+
+- **Hidden width is 64, not 256.** Differentiating the per-element weight
+  loop at 256-wide did not finish compiling in this Slang toolchain even
+  after 15+ minutes (32-wide: ~1.5s, 64-wide: ~9-25s depending on loop
+  strategy -- clearly superlinear, and 256-wide falls off that curve
+  entirely). 64 is the widest that compiled reliably in single-digit
+  seconds. Going wider would need the network rewritten around Slang's
+  native `matrix<T,M,N>` ops instead of a scalar per-element loop, which is
+  a larger change than this port covers. Expect a correspondingly lower IoU
+  than the table above (this port reaches ~0.56 at L=6, 1500 steps).
+- **`L` is a preprocessor `#define`, not a Slang generic.** A generic
+  `Network<let L : int>` struct did not survive `bwd_diff` in testing -- the
+  compiler either hung indefinitely or crashed differentiating through a
+  struct whose field types depend on a generic int parameter. Plain structs
+  sized from a `#define` compile and train correctly, so the Python driver
+  passes `L` in via the SlangPy `defines` compiler option.
+- **The `predict_batch` kernel is "warmed up" with a dummy call before
+  training starts.** Calling it for the first time only *after* hundreds of
+  `calculate_grads` dispatches intermittently failed to allocate its GPU
+  buffers (`createBuffer` / `SLANG_FAIL`); triggering that one-time pipeline
+  creation up front avoids it. Reusing persistent GPU buffers (via
+  `copy_from_numpy`) instead of allocating a fresh one every training step
+  was also necessary -- allocating thousands of short-lived buffers back to
+  back triggered the same failure.
+
+These read as real limitations/bugs in this specific Slang/SlangPy version,
+not deliberate design choices -- a newer toolchain release may not need them.

@@ -28,14 +28,14 @@ struct NetworkParameters<int Inputs, int Outputs>
     [BackwardDerivativeOf(get_bias)]
     void get_bias_bwd(int neuron, float grad)
     {
-        // .set on an atomic tensor atomically adds the result
+        // .add on an atomic tensor atomically adds the result
         biases_grad.add(neuron, grad);
     }
 
     [BackwardDerivativeOf(get_weight)]
     void get_weight_bwd(int neuron, int input, float grad)
     {
-        // .set on an atomic tensor atomically adds the result
+        // .add on an atomic tensor atomically adds the result
         weights_grad.add(neuron, input, grad);
     }
 

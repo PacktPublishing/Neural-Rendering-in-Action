@@ -28,14 +28,14 @@ struct NetworkParameters<int Inputs, int Outputs>
     [BackwardDerivativeOf(get_bias)]
     void get_bias_bwd(int neuron, float grad)
     {
-        // .set on an atomic tensor atomically adds the result
+        // .add on an atomic tensor atomically adds the result
         biases_grad.add(neuron, grad);
     }
 
     [BackwardDerivativeOf(get_weight)]
     void get_weight_bwd(int neuron, int input, float grad)
     {
-        // .set on an atomic tensor atomically adds the result
+        // .add on an atomic tensor atomically adds the result
         weights_grad.add(neuron, input, grad);
     }
 
@@ -63,39 +63,58 @@ struct NetworkParameters<int Inputs, int Outputs>
     }
 }
 
-struct Network {
-    NetworkParameters<16, 32> layer0;
+struct Network
+{
+    static const int NumOctaves = 4;
+    static const int NumEncodedInputs = 2 * NumOctaves * 2;
+
+    NetworkParameters<NumEncodedInputs, 32> layer0;
     NetworkParameters<32, 32> layer1;
-    NetworkParameters<32, 3>  layer2;
+    NetworkParameters<32, 3> layer2;
 
     [Differentiable]
-float3 eval(no_diff float2 uv)
-{
-    // Frequency encode UV: 4 frequencies x 2 (sin+cos) x 2 (u+v) = 16 inputs
-    float inputs[16];
-    [ForceUnroll]
-    for (int i = 0; i < 4; ++i)
+    float3 eval(no_diff float2 uv)
     {
-        float freq = float(1 << i) * 3.14159265f;
-        inputs[i * 2]         = sin(freq * uv.x);
-        inputs[i * 2 + 1]     = cos(freq * uv.x);
-        inputs[8 + i * 2]     = sin(freq * uv.y);
-        inputs[8 + i * 2 + 1] = cos(freq * uv.y);
+        // For each input (u, v), we get 2 encoded outputs (sin and cos) per octave
+        float encoded_inputs[2 * NumOctaves * 2];
+        [ForceUnroll]
+        for (int octave = 0; octave < NumOctaves; ++octave) {
+            // Rescale u and v to angles for sine and cosine.
+            // At octave 0, we want one period of sin and cos over the whole texture
+            // u and v range from 0 to 1, so we multiply by 2 * pi.
+            // Each octave doubles the frequency, so we also multiply by 2^octave
+            float scale = 2.0f * float.getPi() * float(1 << octave);
+            // Encoding for u
+            encoded_inputs[octave * 4 + 0] = sin(uv[0] * scale);
+            encoded_inputs[octave * 4 + 1] = cos(uv[0] * scale);
+            // Encoding for v
+            encoded_inputs[octave * 4 + 2] = sin(uv[1] * scale);
+            encoded_inputs[octave * 4 + 3] = cos(uv[1] * scale);
+        }
+
+        float output0[32] = layer0.forward(encoded_inputs);
+        [ForceUnroll]
+        for (int i = 0; i < 32; ++i)
+            output0[i] = leakyReLU(output0[i]);
+        float output1[32] = layer1.forward(output0);
+        [ForceUnroll]
+        for (int i = 0; i < 32; ++i)
+            output1[i] = leakyReLU(output1[i]);
+        float output2[3] = layer2.forward(output1);
+        [ForceUnroll]
+        for (int i = 0; i < 3; ++i)
+            output2[i] = exp(output2[i]);
+        return float3(output2[0], output2[1], output2[2]);
     }
-    float output0[32] = layer0.forward(inputs);
-    [ForceUnroll]
-    for (int i = 0; i < 32; ++i)
-        output0[i] = sin(output0[i]);
-    float output1[32] = layer1.forward(output0);
-    [ForceUnroll]
-    for (int i = 0; i < 32; ++i)
-        output1[i] = sin(output1[i]);
-    float output2[3] = layer2.forward(output1);
-    [ForceUnroll]
-    for (int i = 0; i < 3; ++i)
-        output2[i] = exp(output2[i]);
-    return float3(output2[0], output2[1], output2[2]);
 }
+
+[Differentiable]
+float leakyReLU(float x, float negativeSlope = 0.01f)
+{
+    if (x > 0.0f)
+        return x;
+    else
+        return x * negativeSlope;
 }
 
 // "Render" the neural texture

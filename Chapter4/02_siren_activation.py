@@ -6,8 +6,8 @@ import numpy as np
 from pathlib import Path
 
 # Create the app and load the slang module.
-app = App(width=512 * 3 + 10 * 2, height=512, title="Simple MLP with Frequency Encoding")
-module = spy.Module.load_from_file(app.device, "02_frequency_encoding.slang")
+app = App(width=512 * 3 + 10 * 2, height=512, title="Simple MLP with SIREN Activations")
+module = spy.Module.load_from_file(app.device, "02_siren_activation.slang")
 
 # Load some materials.
 data_path = Path(__file__).parent
@@ -20,17 +20,26 @@ if _arr.ndim == 3 and _arr.shape[2] == 4:
 else:
     image = _image_raw
 
+OMEGA_0 = 30.0
+
 
 class NetworkParameters(spy.InstanceList):
-    def __init__(self, inputs: int, outputs: int):
+    def __init__(self, inputs: int, outputs: int, is_first_layer: bool = False):
         super().__init__(module[f"NetworkParameters<{inputs},{outputs}>"])
         self.inputs = inputs
         self.outputs = outputs
 
-        # Biases and weights for the layer.
+        # SIREN initialization (Sitzmann et al. 2020)
+        # First layer: U(-1/fan_in, 1/fan_in)
+        # Hidden layers: U(-sqrt(6/fan_in)/omega_0, sqrt(6/fan_in)/omega_0)
+        if is_first_layer:
+            w_limit = 1.0 / inputs
+        else:
+            w_limit = np.sqrt(6.0 / inputs) / OMEGA_0
+
         self.biases = spy.Tensor.from_numpy(app.device, np.zeros(outputs).astype("float32"))
         self.weights = spy.Tensor.from_numpy(
-            app.device, np.random.uniform(-0.5, 0.5, (outputs, inputs)).astype("float32")
+            app.device, np.random.uniform(-w_limit, w_limit, (outputs, inputs)).astype("float32")
         )
 
         # Gradients for the biases and weights.
@@ -43,7 +52,6 @@ class NetworkParameters(spy.InstanceList):
         self.v_biases = spy.Tensor.zeros_like(self.biases)
         self.v_weights = spy.Tensor.zeros_like(self.weights)
 
-    # Calls the Slang 'optimize' function for biases and weights
     def optimize(self, learning_rate: float, optimize_counter: int):
         module.optimizer_step(
             self.biases,
@@ -66,11 +74,10 @@ class NetworkParameters(spy.InstanceList):
 class Network(spy.InstanceList):
     def __init__(self):
         super().__init__(module["Network"])
-        self.layer0 = NetworkParameters(16, 32)
+        self.layer0 = NetworkParameters(2, 32, is_first_layer=True)
         self.layer1 = NetworkParameters(32, 32)
         self.layer2 = NetworkParameters(32, 3)
 
-    # Calls the Slang 'optimize' function for the layer.
     def optimize(self, learning_rate: float, optimize_counter: int):
         self.layer0.optimize(learning_rate, optimize_counter)
         self.layer1.optimize(learning_rate, optimize_counter)
@@ -81,7 +88,6 @@ network = Network()
 
 optimize_counter = 0
 
-# Slang will compile the shaders the first time we call into them (i.e. in the first iteration)
 print("Compiling shaders... this may take a while")
 
 while app.process_events():
@@ -91,8 +97,6 @@ while app.process_events():
     app.blit(image, size=spy.int2(512), offset=spy.int2(offset, 0), tonemap=False, bilinear=True)
     offset += 512 + 10
     res = spy.int2(256, 256)
-    # Train a batch of samples at a time. Smaller batches train faster, but are more "jittery"
-    # A better strategy is to use small batches at the start, and slowly increase them over time
     batch_size = (64, 64)
 
     # Render current neural texture
@@ -110,7 +114,6 @@ while app.process_events():
 
     learning_rate = 0.001
 
-    # NOTE: For faster feedback we use a low number of iterations (20) per frame. This will be more efficient if you turn it up.
     for i in range(20):
         module.calculate_grads(
             seed=spy.wang_hash(seed=optimize_counter, warmup=2),
