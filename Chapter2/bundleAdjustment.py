@@ -74,12 +74,15 @@ def run_reconstruction():
         
         _, R, t, mask = cv2.recoverPose(E, pts1, pts2, K, mask=mask)
 
-        inliers = np.sum(mask == 255)
+        inliers = np.sum(mask != 0)
         print(f"Inliers after essential matrix estimation: {inliers}")
 
-        # Filter inliers
-        pts1_in = pts1[mask.ravel() == 255]
-        pts2_in = pts2[mask.ravel() == 255]
+        # Filter inliers. recoverPose()'s mask marks inliers with any nonzero
+        # value (not necessarily 255, depending on the OpenCV build), so test
+        # for nonzero rather than equality with 255 -- an == 255 test can
+        # silently keep zero points and skip bundle adjustment entirely.
+        pts1_in = pts1[mask.ravel() != 0]
+        pts2_in = pts2[mask.ravel() != 0]
 
         # 5. TRIANGULATION
         P1 = K @ poses[-1][:3, :4]
