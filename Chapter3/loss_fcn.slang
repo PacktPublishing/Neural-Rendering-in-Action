@@ -6,7 +6,7 @@
 
 // Sigmoid activation function (differentiable)
 // MUST be [Differentiable] because it's called inside renderCircleAtPixel,
-// which computeGradientsAutodiff differentiates.
+// which accumulatePixelGrads differentiates.
 // Without this, gradient chain breaks: ∂loss/∂circle_x cannot be computed!
 [Differentiable]
 float sigmoid(float x) {
@@ -36,42 +36,63 @@ float extractCircleMaskValue(float red, float green, float blue) {
 // Step 3.2: Compute Image Centroid
 // ============================================================================
 
-// Compute centroid (center of mass) of a mask
-// Returns (centroid_x, centroid_y)
-void computeImageCentroid(
+// The centroid is a reduction over every pixel, so it goes the same way the
+// gradient statistics do: one thread per pixel accumulating into a shared
+// buffer, then a single thread turning the sums into the answer. A
+// [numthreads(1,1,1)] kernel looping over the image is easier to read, but it
+// leaves the whole GPU idle behind a single lane, and the cost grows with the
+// pixel count - at 1024x1024 it dwarfs the entire parallel gradient step below.
+//
+//   centroid_sums: [total_weight, weighted_x, weighted_y]
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void accumulateCentroidSums(
+    uint3 tid : SV_DispatchThreadID,
+    uniform uint2 image_size,
     RWStructuredBuffer<float> mask,
-    uint2 image_size,
-    out float centroid_x,
-    out float centroid_y
+    RWByteAddressBuffer centroid_sums
 ) {
-    float total_weight = 0;
-    float weighted_x = 0;
-    float weighted_y = 0;
-    
-    for (uint y = 0; y < image_size.y; y++) {
-        for (uint x = 0; x < image_size.x; x++) {
-            uint idx = y * image_size.x + x;
-            float m = mask[idx];
-            
-            total_weight += m;
-            weighted_x += x * m;
-            weighted_y += y * m;
-        }
+    if (tid.x >= image_size.x || tid.y >= image_size.y) return;
+
+    float m = mask[tid.y * image_size.x + tid.x];
+
+    // Reduce within the wave first, exactly as accumulateStatistics does:
+    // one atomic per wave rather than one per pixel.
+    float w  = WaveActiveSum(m);
+    float wx = WaveActiveSum(float(tid.x) * m);
+    float wy = WaveActiveSum(float(tid.y) * m);
+    if (WaveIsFirstLane()) {
+        centroid_sums.InterlockedAddF32(0, w);
+        centroid_sums.InterlockedAddF32(4, wx);
+        centroid_sums.InterlockedAddF32(8, wy);
     }
-    
+}
+
+// Turn the sums into a centre of mass. This has to be a second dispatch: every
+// pixel must have been accumulated before the division can happen, and a
+// compute shader has no device-wide barrier inside a single dispatch.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void finalizeCentroid(
+    uniform uint2 image_size,
+    RWStructuredBuffer<float> centroid_sums,
+    RWStructuredBuffer<float> output_centroid  // [cx, cy]
+) {
+    float total_weight = centroid_sums[0];
+
     // Avoid division by zero
     if (total_weight > 0) {
-        centroid_x = weighted_x / total_weight;
-        centroid_y = weighted_y / total_weight;
+        output_centroid[0] = centroid_sums[1] / total_weight;
+        output_centroid[1] = centroid_sums[2] / total_weight;
     } else {
         // Default to center if no mask
-        centroid_x = image_size.x / 2.0;
-        centroid_y = image_size.y / 2.0;
+        output_centroid[0] = image_size.x / 2.0;
+        output_centroid[1] = image_size.y / 2.0;
     }
 }
 
 // ============================================================================
-// Step 3.4: Compute Distance Loss
+// Step 3.3: Compute Distance Loss
 // ============================================================================
 
 // Compute distance between two centroids, normalized by image size (differentiable)
@@ -92,7 +113,7 @@ float computeDistanceLoss(
 }
 
 // ============================================================================
-// Step 3.5: Compute Size Loss and Radius Growth Incentive
+// Step 3.4: Compute Size Loss and Radius Growth Incentive
 // ============================================================================
 
 // Result structure for size loss computation
@@ -149,7 +170,7 @@ SizeLossResult computeSizeLoss(
 }
 
 // ============================================================================
-// Step 3.6: Unified Loss Computation (All Components Combined)
+// Step 3.5: Unified Loss Computation (All Components Combined)
 // ============================================================================
 
 // Controls how wide the soft edge of the circle is, in pixels.
@@ -165,7 +186,7 @@ static const float EDGE_SHARPNESS = 2.0;
 // Render circle at a single pixel (differentiable)
 // Returns alpha value [0, 1] for smooth circle rendering
 // MUST be [Differentiable] because:
-// 1. computeGradientsAutodiff calls bwd_diff on it, once per pixel
+// 1. accumulatePixelGrads calls bwd_diff on it, once per pixel
 // 2. Takes circle_x, circle_y, circle_radius as parameters (the vars we optimize!)
 // 3. Without this, ∂loss/∂circle_x, ∂loss/∂circle_y, ∂loss/∂circle_radius cannot be computed
 [Differentiable]
@@ -185,8 +206,8 @@ float renderCircleAtPixel(no_diff float px, no_diff float py, float circle_x, fl
 }
 
 // Differentiable loss formula, in terms of image statistics rather than pixels.
-// computeGradientsAutodiff differentiates this to get dLoss/d(statistics), then
-// pushes those derivatives back to the circle parameters one pixel at a time.
+// finalizeLoss differentiates this to get dLoss/d(statistics); accumulatePixelGrads
+// then pushes those derivatives back to the circle parameters, one pixel per thread.
 [Differentiable]
 float computeLossFromStatistics(
     float intersection_pixels,
@@ -231,11 +252,11 @@ float computeLossFromStatistics(
 }
 
 // ============================================================================
-// Compute Shaders for Testing
+// Mask Extraction Shader
 // ============================================================================
 
-// Compute shader for testing mask extraction
-// Process one pixel per thread
+// Turn the target's RGB into the coverage mask the loss integrates against.
+// One pixel per thread.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void extractMaskShader(
@@ -259,61 +280,79 @@ void extractMaskShader(
     output_mask[idx] = extractCircleMaskValue(red, green, blue);
 }
 
-// Compute shader for testing centroid computation
-[shader("compute")]
-[numthreads(1, 1, 1)]
-void computeCentroidShader(
-    uniform uint2 image_size,
-    RWStructuredBuffer<float> input_mask,
-    RWStructuredBuffer<float> output_centroid  // [cx, cy]
-) {
-    float cx, cy;
-    computeImageCentroid(input_mask, image_size, cx, cy);
-    
-    output_centroid[0] = cx;
-    output_centroid[1] = cy;
-}
-
 // ============================================================================
-// AUTODIFF: Compute Gradients using Slang's bwd_diff
+// AUTODIFF: Compute Gradients using Slang's bwd_diff, one thread per pixel
 // ============================================================================
-
-// Compute gradients of loss w.r.t. circle parameters using autodiff
-// This is the main training shader!
+//
+// The work is split across three dispatches, because the statistics have to be
+// complete before any gradient can be computed and a compute shader has no
+// device-wide barrier inside a single dispatch.
+//
+//   A. accumulateStatistics  - one thread per pixel, atomics into stats[]
+//   B. finalizeLoss          - one thread, loss + dLoss/d(statistics)
+//   C. accumulatePixelGrads  - one thread per pixel, atomics into grads[]
 //
 // Differentiating in two phases costs one hand-written chain rule:
-//   phase 1  - accumulate image statistics with no autodiff at all
-//   phase 2a - bwd_diff the *statistics* -> dLoss/d{I, U, R, rcx, rcy}
-//   phase 2b - bwd_diff one pixel at a time, seeded with dLoss/dalpha_i
+//   phase 1  - accumulate image statistics with no autodiff at all (A)
+//   phase 2a - bwd_diff the *statistics* -> dLoss/d{I, U, R, rcx, rcy} (B)
+//   phase 2b - bwd_diff one pixel at a time, seeded with dLoss/dalpha_i (C)
+//
+// Crucially, every atomic here sits in ORDINARY code. Nothing differentiable
+// spans an accumulation, so no custom derivative for the atomic is required.
+
+// ============================================================================
+// A. Statistics, one thread per pixel
+//    stats: [rendered_sum, cx_sum, cy_sum, intersection_sum]
+// ============================================================================
 [shader("compute")]
-[numthreads(1, 1, 1)]
-void computeGradientsAutodiff(
+[numthreads(16, 16, 1)]
+void accumulateStatistics(
+    uint3 tid : SV_DispatchThreadID,
     uniform float circle_x,
     uniform float circle_y,
     uniform float circle_radius,
     uniform uint2 image_size,
+    RWStructuredBuffer<float> target_mask,
+    RWByteAddressBuffer stats
+) {
+    if (tid.x >= image_size.x || tid.y >= image_size.y) return;
+
+    float alpha = renderCircleAtPixel(float(tid.x), float(tid.y),
+                                      circle_x, circle_y, circle_radius);
+    float m = target_mask[tid.y * image_size.x + tid.x];
+
+    // Reduce within the wave first: 16384 atomics onto four addresses is pure
+    // contention, one atomic per wave is not.
+    float s0 = WaveActiveSum(alpha);
+    float s1 = WaveActiveSum(float(tid.x) * alpha);
+    float s2 = WaveActiveSum(float(tid.y) * alpha);
+    float s3 = WaveActiveSum(m * alpha);
+    if (WaveIsFirstLane()) {
+        stats.InterlockedAddF32(0,  s0);
+        stats.InterlockedAddF32(4,  s1);
+        stats.InterlockedAddF32(8,  s2);
+        stats.InterlockedAddF32(12, s3);
+    }
+}
+
+// ============================================================================
+// B. Loss and dLoss/d(statistics), single thread over 4 scalars
+//    ctx: [loss, gI, gU, gR, gcx, gcy, rendered_cx, rendered_cy, inv_R]
+// ============================================================================
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void finalizeLoss(
+    uniform uint2 image_size,
     uniform float target_cx,
     uniform float target_cy,
     uniform float target_pixels,
-    RWStructuredBuffer<float> target_mask,
-    RWStructuredBuffer<float> output_grads  // [loss, grad_x, grad_y, grad_radius]
+    RWStructuredBuffer<float> stats,
+    RWStructuredBuffer<float> ctx
 ) {
-    // ---- Phase 1: forward statistics (plain code, no autodiff) ----
-    float rendered_sum = 0;
-    float cx_sum = 0;
-    float cy_sum = 0;
-    float intersection_sum = 0;
-
-    for (uint y = 0; y < image_size.y; y++) {
-        for (uint x = 0; x < image_size.x; x++) {
-            float alpha = renderCircleAtPixel(float(x), float(y), circle_x, circle_y, circle_radius);
-
-            rendered_sum += alpha;
-            cx_sum += x * alpha;
-            cy_sum += y * alpha;
-            intersection_sum += target_mask[y * image_size.x + x] * alpha;
-        }
-    }
+    float rendered_sum     = stats[0];
+    float cx_sum           = stats[1];
+    float cy_sum           = stats[2];
+    float intersection_sum = stats[3];
 
     float rendered_cx = (rendered_sum > 0) ? (cx_sum / rendered_sum) : (image_size.x / 2.0);
     float rendered_cy = (rendered_sum > 0) ? (cy_sum / rendered_sum) : (image_size.y / 2.0);
@@ -321,63 +360,74 @@ void computeGradientsAutodiff(
 
     float loss = computeLossFromStatistics(
         intersection_sum, union_sum, target_pixels, rendered_sum,
-        target_cx, target_cy, rendered_cx, rendered_cy,
-        image_size
-    );
+        target_cx, target_cy, rendered_cx, rendered_cy, image_size);
 
-    // ---- Phase 2a: dLoss/d(statistics) ----
-    var dp_I = diffPair(intersection_sum);
-    var dp_U = diffPair(union_sum);
-    var dp_R = diffPair(rendered_sum);
+    var dp_I  = diffPair(intersection_sum);
+    var dp_U  = diffPair(union_sum);
+    var dp_R  = diffPair(rendered_sum);
     var dp_cx = diffPair(rendered_cx);
     var dp_cy = diffPair(rendered_cy);
 
     bwd_diff(computeLossFromStatistics)(
         dp_I, dp_U, target_pixels, dp_R,
         target_cx, target_cy, dp_cx, dp_cy,
-        image_size,
-        1.0  // Seed gradient: dloss/dloss = 1.0
-    );
+        image_size, 1.0);
 
-    // ---- Phase 2b: dLoss/d(circle params), one differentiated pixel at a time ----
-    // Chain rule from the statistics down to each pixel's alpha:
-    //   dI/dalpha_i   = mask_i
-    //   dU/dalpha_i   = 1 - mask_i      (U = target_pixels + R - I)
-    //   dR/dalpha_i   = 1
-    //   drcx/dalpha_i = (x_i - rcx) / R (rcx = sum(x*alpha) / R, quotient rule)
-    //   drcy/dalpha_i = (y_i - rcy) / R
-    float inv_R = (rendered_sum > 0) ? (1.0 / rendered_sum) : 0.0;
+    ctx[0] = loss;
+    ctx[1] = dp_I.d;
+    ctx[2] = dp_U.d;
+    ctx[3] = dp_R.d;
+    ctx[4] = dp_cx.d;
+    ctx[5] = dp_cy.d;
+    ctx[6] = rendered_cx;
+    ctx[7] = rendered_cy;
+    ctx[8] = (rendered_sum > 0) ? (1.0 / rendered_sum) : 0.0;
+}
 
-    float grad_x = 0;
-    float grad_y = 0;
-    float grad_r = 0;
+// ============================================================================
+// C. dLoss/d(circle params), one thread per pixel
+//    grads: [grad_x, grad_y, grad_r]
+// ============================================================================
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void accumulatePixelGrads(
+    uint3 tid : SV_DispatchThreadID,
+    uniform float circle_x,
+    uniform float circle_y,
+    uniform float circle_radius,
+    uniform uint2 image_size,
+    RWStructuredBuffer<float> target_mask,
+    RWStructuredBuffer<float> ctx,
+    RWByteAddressBuffer grads
+) {
+    if (tid.x >= image_size.x || tid.y >= image_size.y) return;
 
-    for (uint y = 0; y < image_size.y; y++) {
-        for (uint x = 0; x < image_size.x; x++) {
-            float m = target_mask[y * image_size.x + x];
+    float gI = ctx[1], gU = ctx[2], gR = ctx[3], gcx = ctx[4], gcy = ctx[5];
+    float rendered_cx = ctx[6], rendered_cy = ctx[7], inv_R = ctx[8];
 
-            float dLoss_dAlpha = dp_I.d * m
-                               + dp_U.d * (1.0 - m)
-                               + dp_R.d
-                               + dp_cx.d * (float(x) - rendered_cx) * inv_R
-                               + dp_cy.d * (float(y) - rendered_cy) * inv_R;
+    float m = target_mask[tid.y * image_size.x + tid.x];
 
-            var dp_x = diffPair(circle_x);
-            var dp_y = diffPair(circle_y);
-            var dp_r = diffPair(circle_radius);
+    float dLoss_dAlpha = gI * m
+                       + gU * (1.0 - m)
+                       + gR
+                       + gcx * (float(tid.x) - rendered_cx) * inv_R
+                       + gcy * (float(tid.y) - rendered_cy) * inv_R;
 
-            bwd_diff(renderCircleAtPixel)(float(x), float(y), dp_x, dp_y, dp_r, dLoss_dAlpha);
+    var dp_x = diffPair(circle_x);
+    var dp_y = diffPair(circle_y);
+    var dp_r = diffPair(circle_radius);
 
-            grad_x += dp_x.d;
-            grad_y += dp_y.d;
-            grad_r += dp_r.d;
-        }
+    bwd_diff(renderCircleAtPixel)(float(tid.x), float(tid.y),
+                                  dp_x, dp_y, dp_r, dLoss_dAlpha);
+
+    float gx = WaveActiveSum(dp_x.d);
+    float gy = WaveActiveSum(dp_y.d);
+    float gr = WaveActiveSum(dp_r.d);
+    if (WaveIsFirstLane()) {
+        grads.InterlockedAddF32(0, gx);
+        grads.InterlockedAddF32(4, gy);
+        grads.InterlockedAddF32(8, gr);
     }
-
-    output_grads[0] = loss;
-    output_grads[1] = grad_x;
-    output_grads[2] = grad_y;
-    output_grads[3] = grad_r;
 }
 
 // Thin adapter so the displayed image and the optimized mask can never drift
@@ -413,12 +463,15 @@ void renderCirclesToBuffer(
     
     // Proper alpha blending: circle_color * alpha + background_color * (1 - alpha)
     float3 final_color = circle_color * alpha + background_color * (1.0 - alpha);
-    float final_alpha = 1.0; // Always fully opaque for final image
-    
-    // Write RGBA values to buffer
+
+    // RGB is the composited image, for display. A carries the raw coverage
+    // rather than a constant 1.0, because that is precisely the quantity the
+    // loss integrates - so the debug views can read the optimizer's own
+    // numbers instead of trying to recover them from colour, which cannot be
+    // done: the blend puts red at 1.0 in every pixel. Saved PNGs use RGB only.
     uint idx = (pixelCoord.y * image_size.x + pixelCoord.x) * 4;
     output[idx + 0] = final_color.r;
     output[idx + 1] = final_color.g;
     output[idx + 2] = final_color.b;
-    output[idx + 3] = final_alpha;
+    output[idx + 3] = alpha;
 }

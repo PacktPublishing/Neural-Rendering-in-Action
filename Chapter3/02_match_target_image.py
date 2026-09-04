@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+"""
+Circle fitting with Slang autodiff, gradients computed one thread per pixel.
+
+The gradient of the loss w.r.t. the circle parameters is produced by three
+dispatches rather than a single [numthreads(1,1,1)] kernel looping over the
+image. They have to be three separate dispatches: the statistics must be
+complete before any gradient can be computed, and a compute shader has no
+device-wide barrier inside a single dispatch.
+
+    accumulateStatistics   one thread per pixel, atomics into stats[]
+    finalizeLoss           one thread, loss + dLoss/d(statistics)
+    accumulatePixelGrads   one thread per pixel, atomics into grads[]
+
+All three go into one command buffer, so a training iteration still costs a
+single submit.
+
+    python 02_match_target_image.py
+"""
 import slangpy as spy
 import pathlib
 import numpy as np
@@ -32,44 +50,48 @@ class MatchTargetImage:
     
     def load_shaders(self):
         print("Loading Slang shaders...")
-        
+
         # Load image-based loss shader with autodiff
-        self.image_loss_module = spy.Module.load_from_file(self.device, "loss_fcn.slang")
-        self.image_loss_slang_module = self.device.load_module(self.image_loss_module.name)
+        self.image_loss_slang_module = self.device.load_module("loss_fcn.slang")
 
-        self.circle_program = self.device.link_program(
-            [self.image_loss_slang_module],
-            [self.image_loss_slang_module.entry_point("renderCirclesToBuffer")]
-        )
-        self.circle_kernel = self.device.create_compute_kernel(self.circle_program)
-        
-        self.autodiff_program = self.device.link_program(
-            [self.image_loss_slang_module],
-            [self.image_loss_slang_module.entry_point("computeGradientsAutodiff")]
-        )
-        self.autodiff_kernel = self.device.create_compute_kernel(self.autodiff_program)
+        def kernel(entry_point):
+            program = self.device.link_program(
+                [self.image_loss_slang_module],
+                [self.image_loss_slang_module.entry_point(entry_point)]
+            )
+            return self.device.create_compute_kernel(program)
 
-        self.mask_extraction_program = self.device.link_program(
-            [self.image_loss_slang_module],
-            [self.image_loss_slang_module.entry_point("extractMaskShader")]
-        )
-        self.mask_extraction_kernel = self.device.create_compute_kernel(self.mask_extraction_program)
-        
-        self.centroid_program = self.device.link_program(
-            [self.image_loss_slang_module],
-            [self.image_loss_slang_module.entry_point("computeCentroidShader")]
-        )
-        self.centroid_kernel = self.device.create_compute_kernel(self.centroid_program)
-        
+        self.circle_kernel = kernel("renderCirclesToBuffer")
+        self.mask_extraction_kernel = kernel("extractMaskShader")
+        self.centroid_sums_kernel = kernel("accumulateCentroidSums")
+        self.finalize_centroid_kernel = kernel("finalizeCentroid")
+
+        # The three gradient kernels. They have to be three separate dispatches:
+        # the statistics must be complete before any gradient can be computed,
+        # and a compute shader has no device-wide barrier inside a dispatch.
+        self.stats_kernel = kernel("accumulateStatistics")
+        self.finalize_kernel = kernel("finalizeLoss")
+        self.pixel_grads_kernel = kernel("accumulatePixelGrads")
+
+        # Accumulators, allocated once and cleared on the GPU each iteration.
+        def buffer(n):
+            return self.device.create_buffer(
+                element_count=n, struct_size=4,
+                usage=spy.BufferUsage.unordered_access)
+
+        self.stats_buffer = buffer(4)   # rendered_sum, cx_sum, cy_sum, intersection_sum
+        self.ctx_buffer = buffer(9)     # loss, dLoss/d(statistics), centroid, 1/R
+        self.grads_buffer = buffer(3)   # grad_x, grad_y, grad_r
+
         print("Shaders loaded successfully!")
         print("="*60)
-    
+
     def create_target_image(self):
         print("Creating target image...")
         
         image = np.ones((self.image_size, self.image_size, 3), dtype=np.float32)
         
-        center_x, center_y = 1*(3* self.image_size // 4), 1*(3 * self.image_size // 4)
+        center_x, center_y = 3 * self.image_size // 4, 3 * self.image_size // 4
         radius = 15
         color = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         
@@ -131,13 +153,36 @@ class MatchTargetImage:
             struct_size=4,
             usage=spy.BufferUsage.unordered_access
         )
-        
-        self.centroid_kernel.dispatch(
-            thread_count=[1, 1, 1],
+
+        # Sums for the centroid reduction: [total_weight, weighted_x, weighted_y]
+        centroid_sums = self.device.create_buffer(
+            element_count=3,
+            struct_size=4,
+            usage=spy.BufferUsage.unordered_access
+        )
+
+        # Accumulate one thread per pixel, then divide in a second dispatch.
+        # Both go into one command buffer, so this is still a single submit.
+        encoder = self.device.create_command_encoder()
+        encoder.clear_buffer(centroid_sums)
+
+        self.centroid_sums_kernel.dispatch(
+            thread_count=[self.image_size, self.image_size, 1],
+            command_encoder=encoder,
             image_size=(self.image_size, self.image_size),
-            input_mask=mask_buffer,
+            mask=mask_buffer,
+            centroid_sums=centroid_sums
+        )
+
+        self.finalize_centroid_kernel.dispatch(
+            thread_count=[1, 1, 1],
+            command_encoder=encoder,
+            image_size=(self.image_size, self.image_size),
+            centroid_sums=centroid_sums,
             output_centroid=centroid_buffer
         )
+
+        self.device.submit_command_buffer(encoder.finish())
         
         centroid_data = centroid_buffer.to_numpy().view(np.float32)
         
@@ -150,7 +195,8 @@ class MatchTargetImage:
         print(f"Target statistics: cx={self.target_cx:.4f}, cy={self.target_cy:.4f}, pixels={self.target_pixels:.1f}")
     
     def initialize_parameters(self):
-        # random initialization
+        # Deliberately a poor guess: small, and diagonally opposite the target,
+        # so the run has to travel to converge.
         self.current_params = {
             'x': 10.0,
             'y': 10.0,
@@ -176,34 +222,61 @@ class MatchTargetImage:
         return output_buffer
     
     def compute_autodiff_gradients(self, params):
-        grad_output = self.device.create_buffer(
-            element_count=4,
-            struct_size=4,
-            usage=spy.BufferUsage.unordered_access
-        )
-        
-        self.autodiff_kernel.dispatch(
-            thread_count=[1, 1, 1],
+        size = (self.image_size, self.image_size)
+        threads = [self.image_size, self.image_size, 1]
+
+        # All three dispatches go into one command buffer, so this still costs a
+        # single submit per training iteration.
+        encoder = self.device.create_command_encoder()
+        encoder.clear_buffer(self.stats_buffer)
+        encoder.clear_buffer(self.grads_buffer)
+
+        self.stats_kernel.dispatch(
+            thread_count=threads,
+            command_encoder=encoder,
             circle_x=params['x'],
             circle_y=params['y'],
             circle_radius=params['radius'],
-            image_size=(self.image_size, self.image_size),
+            image_size=size,
+            target_mask=self.target_mask_buffer,
+            stats=self.stats_buffer,
+        )
+
+        self.finalize_kernel.dispatch(
+            thread_count=[1, 1, 1],
+            command_encoder=encoder,
+            image_size=size,
             target_cx=self.target_cx,
             target_cy=self.target_cy,
             target_pixels=self.target_pixels,
-            target_mask=self.target_mask_buffer,
-            output_grads=grad_output
+            stats=self.stats_buffer,
+            ctx=self.ctx_buffer,
         )
-        
-        grad_data = grad_output.to_numpy().view(np.float32)
-        
+
+        self.pixel_grads_kernel.dispatch(
+            thread_count=threads,
+            command_encoder=encoder,
+            circle_x=params['x'],
+            circle_y=params['y'],
+            circle_radius=params['radius'],
+            image_size=size,
+            target_mask=self.target_mask_buffer,
+            ctx=self.ctx_buffer,
+            grads=self.grads_buffer,
+        )
+
+        self.device.submit_command_buffer(encoder.finish())
+
+        grad_data = self.grads_buffer.to_numpy().view(np.float32)
+        ctx_data = self.ctx_buffer.to_numpy().view(np.float32)
+
         return {
-            'loss': float(grad_data[0]),
-            'dx': float(grad_data[1]),
-            'dy': float(grad_data[2]),
-            'dr': float(grad_data[3]),
+            'loss': float(ctx_data[0]),   # the loss is produced by finalizeLoss
+            'dx': float(grad_data[0]),
+            'dy': float(grad_data[1]),
+            'dr': float(grad_data[2]),
         }
-    
+
     def update_parameters(self, gradients, learning_rate=0.5, momentum=0.9):
         if not hasattr(self, 'velocity'):
             self.velocity = {'x': 0.0, 'y': 0.0, 'radius': 0.0}
@@ -258,42 +331,8 @@ class MatchTargetImage:
         
         return x_accuracy, y_accuracy, r_accuracy
     
-    def extract_circle_mask_from_image(self, image):
-        """Extract circle mask from an RGB image.
-
-        Runs the same extractMaskShader the target statistics use, rather than
-        reimplementing extractCircleMaskValue in numpy, so the debug masks can
-        never drift away from what the loss actually sees.
-        """
-        rgba = np.concatenate(
-            [image, np.ones((self.image_size, self.image_size, 1), dtype=np.float32)],
-            axis=2
-        ).astype(np.float32).flatten()
-
-        image_buffer = self.device.create_buffer(
-            element_count=len(rgba),
-            struct_size=4,
-            usage=spy.BufferUsage.unordered_access | spy.BufferUsage.shader_resource,
-            data=rgba
-        )
-        mask_buffer = self.device.create_buffer(
-            element_count=self.image_size * self.image_size,
-            struct_size=4,
-            usage=spy.BufferUsage.unordered_access
-        )
-
-        self.mask_extraction_kernel.dispatch(
-            thread_count=[self.image_size, self.image_size, 1],
-            image_size=(self.image_size, self.image_size),
-            input_image=image_buffer,
-            output_mask=mask_buffer
-        )
-
-        return mask_buffer.to_numpy().view(np.float32).reshape(
-            self.image_size, self.image_size)
-    
     def create_debug_visualization(self, iteration, rendered_buffer):
-        """Create comprehensive debug visualization (matches PyTorch version)."""
+        """Create the six-panel debug view for one iteration."""
         fig, axes = plt.subplots(2, 3, figsize=(18, 12))
         fig.suptitle(f'Circle Learning Debug - Iteration {iteration}', fontsize=16)
         
@@ -313,10 +352,16 @@ class MatchTargetImage:
         
         # 3. Difference image - proper color-coded visualization using masks
         diff = np.zeros_like(rendered_rgb)
-        
-        # Create masks for target and rendered circles
-        target_mask = self.extract_circle_mask_from_image(self.target_image)
-        rendered_mask = self.extract_circle_mask_from_image(rendered_rgb)
+
+        # These are the optimizer's own numbers, not a re-derivation of them.
+        # target_mask is the very buffer the loss integrates against, and the
+        # rendered coverage is the alpha renderCirclesToBuffer wrote. Recovering
+        # coverage from the composited RGB instead would silently threshold it
+        # at alpha = 0.5 and put these panels in a different branch of the loss
+        # than the optimizer is actually in.
+        target_mask = self.target_mask_buffer.to_numpy().view(np.float32).reshape(
+            self.image_size, self.image_size)
+        rendered_mask = rendered_data[:, :, 3]
         
         # Red channel: target areas not covered by rendered
         diff[:, :, 0] = target_mask * (1 - rendered_mask)
@@ -328,12 +373,12 @@ class MatchTargetImage:
         axes[0, 2].axis('off')
         
         # 4. Target mask
-        axes[1, 0].imshow(target_mask, cmap='gray')
+        axes[1, 0].imshow(target_mask, cmap='gray', vmin=0.0, vmax=1.0)
         axes[1, 0].set_title('Target Mask') 
         axes[1, 0].axis('off')
         
         # 5. Rendered mask
-        axes[1, 1].imshow(rendered_mask, cmap='gray')
+        axes[1, 1].imshow(rendered_mask, cmap='gray', vmin=0.0, vmax=1.0)
         axes[1, 1].set_title('Rendered Mask')
         axes[1, 1].axis('off')
         
@@ -372,7 +417,7 @@ class MatchTargetImage:
         abs_loss_path = os.path.abspath(loss_curve_path)
         print(f"Saved loss curve: {abs_loss_path}")
     
-    def train(self, num_iterations=1700, learning_rate=0.5, momentum=0.9):
+    def train(self, num_iterations=4000, learning_rate=0.5, momentum=0.9):
         print(f"Training for {num_iterations} iterations")
         losses = []
 
@@ -381,10 +426,9 @@ class MatchTargetImage:
             result = self.compute_autodiff_gradients(self.current_params)
             losses.append(result['loss'])
             
-            # Update parameters
-            self.update_parameters(result, learning_rate, momentum)
-            
-            # Print progress
+            # Report before updating, so the loss on the progress line, the
+            # debug image and the parameter comparison all describe the same
+            # circle - the one the gradient was just computed at.
             if iteration % 20 == 0 or iteration == num_iterations - 1:
                 print(f"\nIteration {iteration:3d}: Loss = {result['loss']:.6f}")
                 print(f"  Gradients: dx={result['dx']:.6f}, dy={result['dy']:.6f}, dr={result['dr']:.6f}")            
@@ -402,7 +446,11 @@ class MatchTargetImage:
                 if x_acc >= 98 and y_acc >= 98 and r_acc >= 98:
                     print(f"\n EARLY STOPPING: All parameters achieved 98%+ accuracy! Iteration {iteration}")
                     print(f"   Stopped at iteration {iteration} (saved {num_iterations - iteration - 1} iterations)")
-                    break                    
+                    break
+
+            # Update parameters
+            self.update_parameters(result, learning_rate, momentum)
+
         
         # Save final results
         final_rendered = self.render_circle(self.current_params)
@@ -423,7 +471,7 @@ class MatchTargetImage:
         return losses
 
 def main():
-    print("Matching target image with Slang")
+    print("Matching target image with Slang (parallel gradients)")
     print("="*60)
     learner = MatchTargetImage(image_size=128)  
     losses = learner.train(num_iterations=4000, learning_rate=0.5, momentum=0.9)
