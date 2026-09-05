@@ -14,6 +14,9 @@ A beginner-friendly implementation of the Harris Corner Detection algorithm with
 - Python 3.7 or higher
 - See `requirements.txt` for package dependencies
 
+Last verified with Python 3.12.6, NumPy 2.5.2, SciPy 1.18.1, Matplotlib 3.11.1, and
+Pillow 12.3.0.
+
 ## Installation
 
 ### Windows
@@ -23,7 +26,7 @@ A beginner-friendly implementation of the Harris Corner Detection algorithm with
 Open PowerShell or Command Prompt and navigate to the project directory:
 
 ```bash
-cd C:\Users\preet\OneDrive\Presentation\NeuralRenderingInAction\Chapter1\Code
+cd path\to\Neural-Rendering-in-Action\Chapter1
 ```
 
 Create a virtual environment:
@@ -60,7 +63,7 @@ pip install -r requirements.txt
 #### 1. Create a Virtual Environment
 
 ```bash
-cd ~/path/to/NeuralRenderingInAction/Chapter1/Code
+cd path/to/Neural-Rendering-in-Action/Chapter1
 python3 -m venv venv
 ```
 
