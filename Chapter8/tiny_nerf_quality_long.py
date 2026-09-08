@@ -27,15 +27,16 @@ TINY_NERF_URL = "http://cseweb.ucsd.edu/~viscomp/projects/LF/papers/ECCV20/nerf/
 TINY_QUALITY_LONG_CONFIG = {
     "dataset_type": "tiny",
     "seed": 7,
+    # Both networks use this eight-layer trunk and have independent weights.
     "width": 256,
     "depth": 8,
-    "skip": 4,
+    "skip": 4,  # Zero-based: concatenate after layer 5, into layer 6.
     "pos_freqs": 10,
     "dir_freqs": 4,
-    "include_input": True,
-    "use_pi": False,
+    "include_input": True,  # 63 position features and 27 direction features.
+    "use_pi": False,  # The chapter run uses 2**k frequencies without pi.
     "n_coarse": 64,
-    "n_fine": 64,
+    "n_fine": 64,  # Additional depths; the fine network evaluates 64 + 64.
     "n_rays": 2048,
     "iters": 12000,
     "lr": 5e-4,
@@ -71,7 +72,7 @@ class NerfData:
 
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, num_freqs: int, include_input: bool = True, use_pi: bool = True):
+    def __init__(self, num_freqs: int, include_input: bool = True, use_pi: bool = False):
         super().__init__()
         self.include_input = include_input
         freqs = 2.0 ** torch.arange(num_freqs, dtype=torch.float32)
@@ -373,7 +374,7 @@ def build_model(config: dict, device: torch.device):
     pos_freqs = int(config.get("pos_freqs", 10))
     dir_freqs = int(config.get("dir_freqs", 4))
     include_input = bool(config.get("include_input", True))
-    use_pi = bool(config.get("use_pi", True))
+    use_pi = bool(config.get("use_pi", False))
     encode_pos = PositionalEncoding(pos_freqs, include_input, use_pi).to(device)
     encode_dir = PositionalEncoding(dir_freqs, include_input, use_pi).to(device)
 
@@ -385,6 +386,7 @@ def build_model(config: dict, device: torch.device):
     coarse = NeRF(pos_dim, dir_dim, width=width, depth=depth, skip=skip).to(device)
     fine = None
     if int(config.get("n_fine", 0)) > 0:
+        # Same architecture as coarse, initialized with separate parameters.
         fine = NeRF(pos_dim, dir_dim, width=width, depth=depth, skip=skip).to(device)
 
     def wrap(net):
@@ -462,6 +464,7 @@ def render_image(data, pose, coarse, fine, wrap, config, device):
 
 
 def train_nerf(config: dict):
+    config = dict(config)
     set_seed(int(config.get("seed", 0)))
     device = torch.device(config.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
     outdir = Path(config.get("outdir", "runs/nerf"))
@@ -514,9 +517,12 @@ def train_nerf(config: dict):
             chunk=int(config.get("chunk", 32768)),
         )
 
-        loss = F.mse_loss(out_c["rgb"], target)
+        coarse_mse = F.mse_loss(out_c["rgb"], target)
+        image_mse = coarse_mse
+        loss = coarse_mse
         if out_f is not None:
-            loss = loss + F.mse_loss(out_f["rgb"], target)
+            image_mse = F.mse_loss(out_f["rgb"], target)
+            loss = loss + image_mse
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -528,7 +534,7 @@ def train_nerf(config: dict):
                 group["lr"] = lr * decay
 
         if step == 1 or step % int(config.get("log_every", 50)) == 0:
-            print(f"[{step:06d}/{n_iters}] loss={loss.item():.6f} psnr={psnr_from_mse(loss).item():.2f}")
+            print(f"[{step:06d}/{n_iters}] loss={loss.item():.6f} psnr={psnr_from_mse(image_mse).item():.2f}")
 
         if step == 1 or step % eval_every == 0 or step == n_iters:
             idx = int(config.get("test_index", 0)) % test_data.images.shape[0]
@@ -546,7 +552,7 @@ def train_nerf(config: dict):
                     "step": step,
                     "coarse": coarse.state_dict(),
                     "fine": fine.state_dict() if fine is not None else None,
-                    "config": config,
+                    "config": dict(config),
                 },
                 outdir / "checkpoint.pt",
             )
@@ -650,7 +656,7 @@ def load_checkpoint_models(checkpoint_path: Path, data_path: Path, outdir: Path,
     device = torch.device(device_name)
     coarse, fine, wrap = build_model(config, device)
     coarse.load_state_dict(checkpoint["coarse"])
-    if fine is not None and checkpoint.get("fine") is not None:
+    if fine is not None:
         fine.load_state_dict(checkpoint["fine"])
 
     coarse.eval()
@@ -671,7 +677,7 @@ def render_eval_image(checkpoint_path: Path, data_path: Path, outdir: Path, devi
     mse = F.mse_loss(render["rgb"], target)
     psnr = psnr_from_mse(mse)
 
-    step = int(checkpoint.get("step", config.get("iters", 0)))
+    step = int(checkpoint["step"])
     step_tag = f"{step:06d}" if step > 0 else "final"
 
     paths = {
@@ -897,6 +903,20 @@ def render_turntable(
 
     centers = train_data.poses[:, :3, 3]
     orbit_radius = radius if radius is not None else float(torch.linalg.norm(centers, dim=-1).mean())
+    (out_dir / "render_config.json").write_text(
+        json.dumps({
+            "checkpoint": str(checkpoint_path.resolve()),
+            "frames": frames,
+            "scale": scale,
+            "phi_degrees": phi,
+            "radius": orbit_radius,
+            "theta_start_degrees": -180.0,
+            "theta_endpoint_excluded": 180.0,
+            "height": data.H,
+            "width": data.W,
+        }, indent=2),
+        encoding="utf-8",
+    )
 
     frame_names = []
     depth_names = []
@@ -937,8 +957,8 @@ def main():
     parser.add_argument("--data-root", default=None, help="Defaults to ./data under the current directory.")
     parser.add_argument("--outdir", default=None, help="Defaults to ./runs/tiny_quality_long under the current directory.")
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
-    parser.add_argument("--iters", type=int, default=12000)
-    parser.add_argument("--n-rays", type=int, default=2048)
+    parser.add_argument("--iters", type=int, default=TINY_QUALITY_LONG_CONFIG["iters"], help="Training steps (default: 12000).")
+    parser.add_argument("--n-rays", type=int, default=TINY_QUALITY_LONG_CONFIG["n_rays"], help="Rays per training step (default: 2048).")
     parser.add_argument("--frames", type=int, default=36)
     parser.add_argument("--scale", type=float, default=2.0)
     parser.add_argument("--phi", type=float, default=-30.0)
@@ -971,7 +991,6 @@ def main():
 
     outdir.mkdir(parents=True, exist_ok=True)
     config = make_config(data_path, outdir, device_name, args.iters, args.n_rays)
-    (outdir / "chapter_config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
 
     checkpoint_path = resolve_path(args.checkpoint, outdir / "checkpoint.pt") if args.checkpoint else outdir / "checkpoint.pt"
     if args.checkpoint:
@@ -985,6 +1004,11 @@ def main():
         train_nerf(config)
         if not checkpoint_path.exists():
             raise RuntimeError(f"Training finished but checkpoint was not written: {checkpoint_path}")
+
+    # Record the saved configuration used for rendering.
+    effective_config = dict(torch.load(checkpoint_path, map_location="cpu", weights_only=False)["config"])
+    effective_config.update(datadir=str(data_path), outdir=str(outdir), device=device_name)
+    (outdir / "chapter_config.json").write_text(json.dumps(effective_config, indent=2), encoding="utf-8")
 
     eval_paths = render_eval_image(checkpoint_path, data_path, outdir, device_name)
     make_contact_sheet(
