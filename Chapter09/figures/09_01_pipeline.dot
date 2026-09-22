@@ -1,0 +1,43 @@
+// Figure 9.1 - the chapter pipeline.
+// Rendered by figures/build.py; edit this file, not the PNG.
+// One box per stage in a single column, so every edge is a straight vertical
+// arrow: no diagonals to follow, and the figure reads top to bottom.
+digraph pipeline {
+  rankdir = TB;
+  compound = true;
+  splines = ortho;
+  ranksep = 0.28;
+  nodesep = 0.24;
+  margin = 0;
+  bgcolor = "white";
+  node [shape=box, style="filled,rounded", fillcolor="#F2F2F2", color="#808080",
+        fontname="Calibri", fontsize=11, margin="0.18,0.07", width=4.6];
+  edge [fontname="Consolas", fontsize=10, color="#404040", fontcolor="#202020",
+        arrowsize=0.9];
+
+  subgraph cluster_part1 {
+    label = "Part 1 — Python (Listing 9.1, driven by 01_reconstruct.py)";
+    fontname = "Calibri"; fontsize = 11; fontcolor = "#202020";
+    color = "#BFBFBF"; style = "rounded"; margin = 9; labeljust = "l";
+
+    video  [label="video.mp4\lhand-held phone video\l", fillcolor="#FFFFFF"];
+    frames [label="extract_keyframes(), section 2\lwork/frames/*.jpg\l350 keyframes at 1280 × 720\l"];
+    recon  [label="reconstruct(), sections 3–9\lwork/reconstruction.npz + work/cameras.json\l345 camera poses, 50,168 sparse points\l"];
+    ply    [label="train(), sections 10–13\lwork/splats.ply\l332,634 Gaussians\l",
+            fillcolor="#E6E6E6"];
+
+    video  -> frames;
+    frames -> recon;
+    recon  -> ply;
+  }
+
+  subgraph cluster_part2 {
+    label = "Part 2 — C++ and Vulkan (Listing 9.2)";
+    fontname = "Calibri"; fontsize = 11; fontcolor = "#202020";
+    color = "#BFBFBF"; style = "rounded"; margin = 9; labeljust = "l";
+
+    viewer [label="splat_viewer\lload, depth-sort, rasterize\l", fillcolor="#FFFFFF"];
+  }
+
+  ply -> viewer [label="  both files", lhead="cluster_part2"];
+}
