@@ -1,1 +1,15 @@
 __pycache__/
+bin/
+build/
+cmake-build-*/
+deps/.bootstrap.json
+deps/archives/
+deps/src/
+deps/__pycache__/
+.DS_Store
+imgui.ini
+.build/
+.idea
+.vs/
+*.exe
+*.mp4
