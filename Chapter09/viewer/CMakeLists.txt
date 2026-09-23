@@ -17,10 +17,11 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(BUILD_SHARED_LIBS OFF)
 
 # The repository root, two levels above this file. Everything the viewer pulls
-# in -- RPly, nlohmann/json, LightweightVK -- lives under `deps/` there.
+# in -- RPly, nlohmann/json, LightweightVK -- lives under `Chapter09/deps/`.
 cmake_path(SET BOOK_ROOT NORMALIZE "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+cmake_path(SET DEPS_ROOT NORMALIZE "${CMAKE_CURRENT_SOURCE_DIR}/../deps")
 if(NOT DEFINED LVK_ROOT)
-  set(LVK_ROOT "${BOOK_ROOT}/deps/src/lightweightvk")
+  set(LVK_ROOT "${DEPS_ROOT}/src/lightweightvk")
 endif()
 cmake_path(SET LVK_ROOT NORMALIZE "${LVK_ROOT}")
 
@@ -39,7 +40,7 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 set(ENV{LVK_WITH_SLANG} "OFF")
 
-set(DEPS_CACHE_FILE "${BOOK_ROOT}/deps/.bootstrap.json")
+set(DEPS_CACHE_FILE "${DEPS_ROOT}/.bootstrap.json")
 
 # Ours lives beside this directory, in Chapter09, and resolves `deps/` itself;
 # LightweightVK's is its own script, run from its own root.
@@ -50,7 +51,7 @@ execute_process(COMMAND ${Python3_EXECUTABLE} deploy_deps.py
                 WORKING_DIRECTORY ${LVK_ROOT} COMMAND_ERROR_IS_FATAL ANY)
 
 add_custom_command(COMMAND ${Python3_EXECUTABLE} "${DEPLOY_DEPS}" OUTPUT ${DEPS_CACHE_FILE}
-                   DEPENDS "${BOOK_ROOT}/deps/bootstrap.json")
+                   DEPENDS "${DEPS_ROOT}/bootstrap.json")
 add_custom_target(Dependencies DEPENDS ${DEPS_CACHE_FILE})
 set_property(TARGET Dependencies PROPERTY FOLDER "third-party")
 
@@ -61,8 +62,8 @@ if(NOT EXISTS "${LVK_ROOT}/lvk/LVK.h")
   message(FATAL_ERROR "LightweightVK not found at ${LVK_ROOT}. Run 'python Chapter09/deploy_deps.py', "
                       "or re-run CMake with -DLVK_ROOT=<path>.")
 endif()
-foreach(dep "deps/src/rply/rply.c" "deps/src/json/single_include/nlohmann/json.hpp")
-  if(NOT EXISTS "${BOOK_ROOT}/${dep}")
+foreach(dep "src/rply/rply.c" "src/json/single_include/nlohmann/json.hpp")
+  if(NOT EXISTS "${DEPS_ROOT}/${dep}")
     message(FATAL_ERROR "${dep} not found. Run 'python Chapter09/deploy_deps.py'.")
   endif()
 endforeach()
@@ -98,7 +99,7 @@ add_definitions(-DGLM_ENABLE_EXPERIMENTAL)
 
 add_executable(splat_viewer
   main.cpp
-  "${BOOK_ROOT}/deps/src/rply/rply.c"
+  "${DEPS_ROOT}/src/rply/rply.c"
   "${LVK_ROOT}/samples/VulkanApp.cpp")
 
 # RPly passes an uninitialized `ply` to the error callback on the type-check
@@ -109,7 +110,7 @@ add_executable(splat_viewer
 # silence a warning is worse than the warning, so suppress it for this one
 # source file rather than for the whole target.
 if(MSVC)
-  set_source_files_properties("${BOOK_ROOT}/deps/src/rply/rply.c"
+  set_source_files_properties("${DEPS_ROOT}/src/rply/rply.c"
                               PROPERTIES COMPILE_OPTIONS "/wd4700")
 endif()
 
@@ -120,8 +121,8 @@ endif()
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT splat_viewer)
 
 target_include_directories(splat_viewer PRIVATE
-  "${BOOK_ROOT}/deps/src/rply"                                       # rply.h
-  "${BOOK_ROOT}/deps/src/json/single_include"                        # nlohmann/json.hpp
+  "${DEPS_ROOT}/src/rply"                                            # rply.h
+  "${DEPS_ROOT}/src/json/single_include"                             # nlohmann/json.hpp
   "${LVK_ROOT}/samples"                                              # VulkanApp.h
   "${LVK_ROOT}/third-party/deps/src"                                 # stb/stb_image.h
   "${LVK_ROOT}/third-party/deps/src/glm"                             # glm

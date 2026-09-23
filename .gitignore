@@ -2,10 +2,10 @@ __pycache__/
 bin/
 build/
 cmake-build-*/
-deps/.bootstrap.json
-deps/archives/
-deps/src/
-deps/__pycache__/
+Chapter09/deps/.bootstrap.json
+Chapter09/deps/archives/
+Chapter09/deps/src/
+Chapter09/deps/__pycache__/
 .DS_Store
 imgui.ini
 .build/

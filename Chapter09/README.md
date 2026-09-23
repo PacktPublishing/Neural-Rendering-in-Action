@@ -39,7 +39,7 @@ guess where to stand shows a forward-facing capture as shattered glass.
 
 ## Part 2 — the viewer
 
-One CMake project; it bootstraps `deps/` itself. Needs CMake 3.22+, a C++20 compiler, a Vulkan GPU,
+One CMake project; it bootstraps `Chapter09/deps/` itself. Needs CMake 3.22+, a C++20 compiler, a Vulkan GPU,
 and Python on `PATH`. Run from the repository root:
 
 ```

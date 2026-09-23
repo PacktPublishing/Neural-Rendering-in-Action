@@ -611,10 +611,10 @@ std::vector<Candidate> collectCandidates(std::initializer_list<fs::path> starts)
   for (fs::path dir : starts) {
     for (int level = 0; level < 5 && !dir.empty(); level++) {
       // `work` is where the driver writes, from either the repository root or
-      // `Chapter09` itself. The last entry is where `deploy_deps.py` unpacks
+      // `Chapter09` itself. The last two are where `deploy_deps.py` unpacks
       // the reference scenes from 3D Gaussian Splatting, so those show up in
       // the dialog too.
-      for (const char* sub : {"", "work", "Chapter09/work", "deps/src/3dgs-pretrained"})
+      for (const char* sub : {"", "work", "Chapter09/work", "deps/src/3dgs-pretrained", "Chapter09/deps/src/3dgs-pretrained"})
         scanForModels(*sub ? dir / sub : dir, dir, out);
       const fs::path parent = dir.parent_path();
       if (parent == dir)
@@ -826,12 +826,13 @@ VULKAN_APP_MAIN {
    * executable as well, and pass absolute paths: `dir / subdir` leaves an
    * absolute subdir alone. These strings must outlive `app`.
    */
-  std::string contentDir = "deps/src/lightweightvk/third-party/content/";
-  std::string thirdPartyDir = "deps/src/lightweightvk/third-party/deps/src/";
+  std::string contentDir = "Chapter09/deps/src/lightweightvk/third-party/content/";
+  std::string thirdPartyDir = "Chapter09/deps/src/lightweightvk/third-party/deps/src/";
   {
     std::error_code ec;
     for (const fs::path& from : {fs::current_path(ec), fs::weakly_canonical(argv[0], ec).parent_path()}) {
-      const fs::path content = findNearby(from, {"deps/src/lightweightvk/third-party/content"});
+      const fs::path content = findNearby(from, {"deps/src/lightweightvk/third-party/content",
+                                                 "Chapter09/deps/src/lightweightvk/third-party/content"});
       if (content.empty())
         continue;
       contentDir = content.string() + "/";
