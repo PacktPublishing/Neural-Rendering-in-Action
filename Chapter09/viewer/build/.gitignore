@@ -1,0 +1,3 @@
+# Build outputs. This file only exists so that Git creates the folder.
+*
+!.gitignore

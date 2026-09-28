@@ -1,0 +1,36 @@
+[
+    {
+        "name": "lightweightvk",
+        "source": {
+            "type": "git",
+            "url": "https://github.com/corporateshark/lightweightvk.git",
+            "revision": "eea110dd7604ad10ceae1cfe316eaf133895c2bc"
+        }
+    },
+    {
+        "name": "rply",
+        "source": {
+            "type": "archive",
+            "url": "https://w3.impa.br/~diego/software/rply/rply-1.1.4.tar.gz",
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/48.0.2564.116 Safari/537.36",
+            "sha1": "05e1491cf70dceb6962320a4279f849564ea88c5"
+        }
+    },
+    {
+        "name": "json",
+        "source": {
+            "type": "archive",
+            "url": "https://github.com/nlohmann/json/releases/download/v3.12.0/include.zip",
+            "sha1": "b26c01cd983fc12ab91c98cf4c6bc75f87cfd992"
+        }
+    },
+    {
+        "name": "3dgs-pretrained",
+        "comment": "Pre-trained scenes from 3D Gaussian Splatting (Kerbl et al. 2023). Chapter 9 cross-validates its PyTorch and Vulkan renderers against these -- a foreign, forward-facing model is what catches bugs an object-centred capture cannot. 13.65 GiB.",
+        "source": {
+            "type": "archive",
+            "url": "https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/datasets/pretrained/models.zip",
+            "sha1": "7dcbd0e24f5bacfb1fc7a1b58dd14600241e5a18"
+        }
+    }
+]
