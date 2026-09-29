@@ -9,6 +9,16 @@ Below you can learn about features, system requirements, how to build Aurora, ho
 
 <p align="center"><i>Screenshots of <a href="#sample-data">the Autodesk Telescope model</a> rendered with Aurora. Model courtesy of <a href="https://robertoziche.com">Roberto Ziche</a>.</i></p>
 
+## Fork notes (Neural Rendering in Action)
+
+This is a fork of [Autodesk's Aurora](https://github.com/autodesk/aurora) used in Chapter 5 of *Neural Rendering in Action*, which adds differentiable rendering support so Aurora's path tracer can be optimized against target images with gradient descent.
+
+Key commits:
+
+- [`32354cc`](https://github.com/PacktPublishing/Neural-Rendering-in-Action/commit/32354cc67e9f4ccffb2ad1db5016770b05551022) — Add differentiable rendering to Aurora. This is the change Chapter 5 walks through.
+
+Everything below this section is Autodesk's own upstream documentation.
+
 ## Features
 
 - Path tracing and the global effects that come with it: soft shadows, reflections, refractions, bounced light, and more.

@@ -7,7 +7,7 @@ x right, y **down**, z forward.
 
 | File | Listing | |
 |---|---|---|
-| `splatting.py` | 9.1 | All of Part 1 in one module, thirteen sections in chapter order |
+| `deps/splatting.py` | 9.1 | All of Part 1 in one module, thirteen sections in chapter order |
 | `01_reconstruct.py` | 9.3 | The driver: video in, `splats.ply` and `cameras.json` out |
 | `viewer/main.cpp` | 9.2 | The real-time viewer; five non-obvious things marked GOTCHA |
 | `02_compare_renderers.py` | 9.4 | Renders one camera both ways and differences the images |
@@ -32,7 +32,7 @@ python 01_reconstruct.py --skip frames sfm --iterations 15000
 ```
 
 Defaults are the chapter's: 350 keyframes, 7,000 iterations, 450,000 Gaussians, focal prior 1.05
-image widths. `--optimize-focal` is off deliberately; see the note on `splatting.SfMConfig`.
+image widths. `--optimize-focal` is off deliberately; see the note on `deps.splatting.SfMConfig`.
 Training holds out every eighth view, and that held-out PSNR is the only number that means
 anything. Part 2 needs both output files: a PLY carries no camera information, and a viewer left to
 guess where to stand shows a forward-facing capture as shattered glass.

@@ -17,3 +17,4 @@ matplotlib>=3.7
 numpy>=1.24
 Pillow>=10.0
 nbformat>=5.9
+jupyterlab>=4.0

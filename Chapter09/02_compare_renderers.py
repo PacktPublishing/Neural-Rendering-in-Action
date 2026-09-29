@@ -35,7 +35,7 @@ import cv2
 import numpy as np
 import torch
 
-from splatting import (Camera, look_at_view, model_from_ply, rasterize, read_cameras, write_cameras)
+from deps.splatting import (Camera, look_at_view, model_from_ply, rasterize, read_cameras, write_cameras)
 
 
 def unit_test(args) -> None:
@@ -43,7 +43,7 @@ def unit_test(args) -> None:
 
     Splats on a sphere shell, small enough not to overlap on screen, so there is no ordering freedom left for a bug to hide in.
     """
-    from splatting import GaussianModel, inverse_sigmoid, save_gaussian_ply
+    from deps.splatting import GaussianModel, inverse_sigmoid, save_gaussian_ply
 
     work = Path(args.work) / "unit"
     work.mkdir(parents=True, exist_ok=True)

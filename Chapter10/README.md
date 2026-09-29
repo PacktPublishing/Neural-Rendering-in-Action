@@ -1,32 +1,55 @@
-# Chapter 10 — Generative Models for Graphics: A Diffusion Primer
+# Chapter 10: Generative Models for Graphics
 
-Companion code for the *Neural Rendering in Action* chapter: GANs, VAEs, diffusion from first
-principles, the U-Net denoiser, Stable Diffusion driven by hand, classifier-free guidance,
-ControlNet, and seamless tileable textures.
+The [diffusion primer notebook](diffusion_primer.ipynb) moves from small
+GANs and VAEs to diffusion models, Stable Diffusion, and ControlNet.
+It runs independently of the other chapters.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/erprashu/neural-rendering-ch10-diffusion/blob/main/ch10_diffusion_primer.ipynb)
+## Run in Colab
 
-## Run it
+[Open the notebook in Colab](https://colab.research.google.com/github/PacktPublishing/Neural-Rendering-in-Action/blob/main/Chapter10/diffusion_primer.ipynb),
+select a GPU under **Runtime > Change runtime type**, then run the cells
+from top to bottom. Later sections reuse models and helpers defined earlier.
+The setup cell installs the extra packages needed in Colab.
 
-**Colab** — click the badge, set **Runtime → Change runtime type → T4 GPU**, then **Runtime → Run
-all**. Package installs, dataset downloads, and model downloads all happen inside the notebook.
+## Run locally
 
-**Locally:**
+Use Python 3.12, preferably in a virtual environment. For GPU execution,
+install a matching PyTorch/torchvision CUDA build using the
+[PyTorch installation instructions](https://pytorch.org/get-started/locally/)
+first. From `Chapter10`:
 
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-jupyter notebook diffusion_primer.ipynb
+```sh
+python -m pip install -r requirements.txt
+python -m jupyterlab diffusion_primer.ipynb
 ```
 
-The notebook follows the chapter section by section and runs top to bottom. Parts 1–6 are fine on
-CPU; Parts 7–10 want a GPU. Those parts use
-[`stable-diffusion-v1-5`](https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5) and
-[`sd-controlnet-depth`](https://huggingface.co/lllyasviel/sd-controlnet-depth) — both public and
-ungated, so **no HuggingFace account or token is needed**.
+Select the kernel for this environment. You can skip the notebook's first
+`%pip install` cell when the dependencies are already installed; that cell
+upgrades the diffusion libraries.
 
-A few training runs are scaled down from the book's numbers so the whole notebook finishes quickly
-on free Colab hardware; each reduction is called out in place, with the chapter's number alongside
-it. Everything stochastic is seeded (`SEED = 42`), so runs reproduce on the same hardware and
-library versions.
+Parts 1–6 can run on the CPU, though image-model training takes longer.
+Use an NVIDIA CUDA-capable GPU for Parts 7–10. The notebook selects CUDA
+when available and otherwise falls back to the CPU.
+
+## What's in the notebook
+
+| Parts | Examples |
+| --- | --- |
+| 1–2 | A GAN on 2D points and a VAE trained on MNIST. |
+| 3–6 | Noise schedules, diffusion on 2D points, a Fashion-MNIST DDPM, and a larger U-Net. |
+| 7–8 | Stable Diffusion's denoising loop and a classifier-free guidance comparison. |
+| 9 | ControlNet generation conditioned on a synthetic sphere depth map. |
+| 10 | Texture tiling with circular padding. |
+| 11 | A conceptual mesh-texturing loop requiring your own renderer and UV-mapped mesh. |
+
+The first run downloads MNIST and Fashion-MNIST into `data/`, followed by
+several gigabytes of pretrained weights for
+[Stable Diffusion 1.5](https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5)
+and [depth ControlNet](https://huggingface.co/lllyasviel/sd-controlnet-depth).
+Plots and generated images appear in the notebook.
+
+Some examples use shorter runs than the book: Fashion-MNIST training defaults
+to five epochs, and Stable Diffusion uses 30 denoising steps. The notebook
+marks these settings where they are used. It uses seed 42; results can still
+vary across hardware and library versions.
 
