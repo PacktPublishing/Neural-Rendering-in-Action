@@ -34,7 +34,7 @@ import time
 from pathlib import Path
 
 
-from splatting import (Reconstruction, SfMConfig, TrainConfig, extract_keyframes, reconstruct, save_gaussian_ply, train, write_cameras_json)
+from deps.splatting import (Reconstruction, SfMConfig, TrainConfig, extract_keyframes, reconstruct, save_gaussian_ply, train, write_cameras_json)
 
 
 def main() -> None:
@@ -57,7 +57,7 @@ def main() -> None:
                              "width (1.05 ~ 51 degrees horizontal FOV)")
     parser.add_argument("--optimize-focal", action="store_true",
                         help="let bundle adjustment refine the intrinsics "
-                             "(see the warning on splatting.SfMConfig)")
+                             "(see the warning on deps.splatting.SfMConfig)")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
