@@ -112,6 +112,10 @@ To build without NRC, configure with `-DVKGLTF_ENABLE_NRC=OFF`.
 | `USE_DRACO` | `ON` | Enable Draco mesh compression support |
 | `BUILD_TESTING` | `OFF` | Build unit tests and benchmarks |
 
+### Key commits
+
+- [`e6b7aae`](https://github.com/PacktPublishing/Neural-Rendering-in-Action/commit/e6b7aaed7105dc3d3dc35a58d6510c122b6e6f13) — Add Neural Radiance Cache (NRC) integration to vk_gltf_renderer. This is the change Chapter 7 walks through in detail.
+
 ## Features
 
 - **Ray tracing**: High-quality path tracing reference for glTF PBR materials — Monte Carlo global illumination, next event estimation, multiple importance sampling, and adaptive sampling.
