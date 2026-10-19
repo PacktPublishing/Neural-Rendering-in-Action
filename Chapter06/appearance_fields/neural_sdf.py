@@ -6,8 +6,7 @@ Paired with `neural_sdf.slang` (the network + its training kernels) and
 section and it lives entirely on the GPU: this file only orchestrates
 dispatches -- it never holds a NumPy mirror of the weights, never samples a
 training batch on the CPU, and never runs the renderer's per-pixel loop
-itself. `common_shapes.slang` (ported from
-`neural_occupancy_fields/shapes.py`) supplies the smooth and knurled torus
+itself. `common_shapes.slang` supplies the smooth and knurled torus
 math every kernel needs; `common_rng.slang` supplies GPU-side randomness, so
 every point AND its label is generated on the GPU and never leaves it until
 a checkpoint or a finished image is downloaded.

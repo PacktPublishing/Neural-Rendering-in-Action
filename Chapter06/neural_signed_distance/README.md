@@ -25,9 +25,8 @@ and `neural_sdf.py` drives it; nothing else here defines a network.
        |       |         +--> ../common_network.slang  NetworkParameters
        |       |         |                              + the Adam step
        |       |         +--> ../common_shapes.slang   the smooth and
-       |       |         |     (ported from neural_occupancy_fields/       knurled tori
-       |       |         |      shapes.py -- one canonical implementation,
-       |       |         |      not three near-duplicates across sections)
+       |       |         |     knurled tori -- one canonical implementation,
+       |       |         |     not three near-duplicates across sections
        |       |         +--> ../common_rng.slang       GPU-side sampling,
        |       |                                        no CPU RNG anywhere
        |       +--> render.slang ......... the sphere-tracing renderer:

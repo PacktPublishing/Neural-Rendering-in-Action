@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The two tori used across Sections 4-6, ported once from
-// neural_occupancy_fields/shapes.py rather than re-derived per section.
+// The two tori used across Sections 4-6 -- one canonical implementation
+// here rather than re-derived per section.
 //
 // Section 4's occupancy target, Section 5's eikonal target, and Section 6's
 // race target are all the SAME shape -- the "knurled" torus, a smooth ring
-// whose tube radius is modulated by a product of two sinusoids -- under two
-// different names (`shapes.py`'s `detailed_torus_inside`/`_effective_r` and
-// `sdf5.py`'s `knurl_inside`/`knurl_surface`). This module keeps
-// `shapes.py`'s names and parameters (R=0.65, r=0.28, amp=0.30, f_theta=8,
-// f_phi=8) as the one canonical implementation. It also carries the SMOOTH
-// torus (Section 5's exact-SDF regression target and Section 6's appearance
-// surface), which shares the same R/r.
+// whose tube radius is modulated by a product of two sinusoids. The names
+// and parameters here (`detailed_torus_inside`/`effective_tube_radius`,
+// R=0.65, r=0.28, amp=0.30, f_theta=8, f_phi=8) follow the pre-SlangPy-port
+// NumPy code's naming (`knurl_inside`/`knurl_surface` in
+// `appearance_fields/numpy_reference/sdf5.py`, kept there as an archived
+// reference -- see that folder's README.md) for continuity with that
+// history. This module also carries the SMOOTH torus (Section 5's
+// exact-SDF regression target and Section 6's appearance surface), which
+// shares the same R/r.
 //
 // Genuinely shared, not copied: every section's own .slang file reaches
 // this by `__exported import common_shapes;` -- Slang's compiler include
