@@ -109,7 +109,8 @@ public:
   // Adaptive sampling for performance optimization
   void                       updateAdaptiveSampling(Resources& resources);
   nvutils::ProfilerTimeline* m_profilerTimeline{nullptr};
-  bool                       m_adaptiveSampling{true};
+  bool                       m_adaptiveSampling{false};
+  bool                       m_accumulate{false};
   int                        m_totalSamplesAccumulated{0};  // Track total samples separately
 
   nvsamples::RollingAverage<float, 100> m_throughputRollingAvg;  // Rolling average of mega-sample-pixels per second (MSPP/s)

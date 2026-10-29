@@ -256,7 +256,8 @@ struct Resources
   // Animation playback state
   AnimationControl animationControl{};
 
-  int frameCount{0};
+  int      frameCount{0};
+  uint32_t forcedRenderFrames{0};  // Runtime one-shot frames requested by controls such as NRC Train 1-Frame.
 
   // Selection: set of render node indices (TLAS order). One primitive = set of size 1; node + branch = many.
   std::unordered_set<int> selectedRenderNodes;

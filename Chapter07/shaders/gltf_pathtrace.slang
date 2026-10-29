@@ -31,6 +31,7 @@
 static bool doDebug = false;
 
 #include "raytracer_interface.h.slang"
+#define GLTF_EXPLICIT_TEXTURE_LOD 1
 #include "gltf_material_eval.h.slang"
 #include "gltf_scene_io.h.slang"
 #include "gltf_vertex_access.h.slang"
@@ -55,6 +56,8 @@ static bool doDebug = false;
 #include "nvshaders/wireframe.h.slang"
 #endif
 
+#include "nrc_renderer_adapter.h.slang"
+
 
 // clang-format off
 
@@ -74,6 +77,60 @@ static bool doDebug = false;
 [[vk::constant_id(1)]]  int USE_DLSS_TRANSP = 0; // Primary surface selection mode
 
 // clang-format on
+
+uint nrcViewModeForPixel(float2 samplePos, float2 imageSize)
+{
+  if(!hasFlag(pushConst.flags, PathtracerFlags::ePtNrcEnabled))
+    return uint(NrcViewMode::eNrcViewNone);
+
+  return (samplePos.x < imageSize.x * 0.5f) ? pushConst.nrcLeftViewMode : pushConst.nrcRightViewMode;
+}
+
+bool nrcViewUsesNetwork(uint viewMode)
+{
+  return viewMode == uint(NrcViewMode::eNrcViewNrc) || viewMode == uint(NrcViewMode::eNrcViewCacheDebug);
+}
+
+bool nrcViewIsCacheDebug(uint viewMode)
+{
+  return viewMode == uint(NrcViewMode::eNrcViewCacheDebug);
+}
+
+// NRC feature positions are normalized into the scene AABB before the
+// frequency encoder sees them. Raw world coordinates make sin(2^k * pi * x)
+// alias wildly and make the encoding scene-scale dependent.
+float3 nrcNormalizePosition(float3 worldPos)
+{
+  return (worldPos - pushConst.nrcSceneMin) * pushConst.nrcSceneInvExtent;
+}
+
+bool nrcCanCacheSurface(PbrMaterial mat, float3 normalizedPosition)
+{
+  // Choose eligibility before sampling a lobe. The cache has no medium or
+  // transmission features. Out-of-domain points must not alias the AABB.
+  return nrc::isCachePositionValid(normalizedPosition)
+      && mat.transmission == 0.0 && mat.diffuseTransmissionFactor == 0.0
+      && min(mat.roughness.x, mat.roughness.y) >= 1e-4
+      && (mat.clearcoat == 0.0 || mat.clearcoatRoughness >= 0.01);
+}
+
+void nrcMaterialReflectance(PbrMaterial mat, out float3 diffuseReflectance, out float3 specularReflectance)
+{
+  // Direction-independent material features also supply the cache's reflectance
+  // normalization. Specular blends tinted dielectric F0 with the metal's base
+  // color; these values do not include the sampled BSDF or its PDF.
+  float  metallic = saturate(mat.metallic);
+  float3 base     = max(mat.baseColor, float3(0.0));
+
+  diffuseReflectance = base * (1.0 - metallic);
+
+  float denom = max(abs(mat.ior1 + mat.ior2), 1e-3);
+  float eta   = (mat.ior2 - mat.ior1) / denom;
+  float dielectricF0 = eta * eta;
+  float3 dielectricSpecular = min(float3(1.0), dielectricF0 * saturate(mat.specular) * max(mat.specularColor, float3(0.0)));
+
+  specularReflectance = lerp(dielectricSpecular, base, metallic);
+}
 
 
 //-----------------------------------------------------------------------
@@ -525,12 +582,14 @@ bool handleShadowCatcher(IRaytracer      raytracer,
                          HitState        hit,
                          PbrMaterial     pbrMat,
                          inout RayDesc   ray,
-                         inout float3    radiance,
-                         inout float3    throughput,
+                         out float3      localRadiance,
+                         out float3      transportFactor,
                          inout float     lastSamplePdf,
                          inout uint      seed,
                          SceneFrameInfo* frameInfo)
 {
+  localRadiance = float3(0);
+  transportFactor = float3(1);
   // Step 1: Sample direct lighting and check for shadows
   DirectLight directLight;
   sampleLights(hit.pos, pbrMat.N, ray.Direction, seed, directLight);
@@ -559,17 +618,17 @@ bool handleShadowCatcher(IRaytracer      raytracer,
   {
     // Apply MIS weight for BSDF sample hitting environment
     float misWeight = computeEnvHitMisWeight(lastSamplePdf, envPdf);
-    radiance += throughput * misWeight * envColor;
+    localRadiance = misWeight * envColor;
     return false;  // Signal to break - plane is invisible here
   }
 
   // Add direct contribution: environment modulated by shadow (darker in shadow)
-  radiance += envColor * shadowFactor;
+  localRadiance = envColor * shadowFactor;
 
   // Non-physical control: subtract a fraction of env in shadowed areas.
   // darkenAmount is precomputed on CPU from slider [0..1] with exponential curve.
   // Subtraction can go negative to darken accumulated radiance.
-  radiance -= envColor * (1.0f - shadowFactor) * frameInfo->shadowCatcherDarkenAmount;
+  localRadiance -= envColor * (1.0f - shadowFactor) * frameInfo->shadowCatcherDarkenAmount;
 
   // Step 4: Handle shadowed areas - sample BSDF for indirect lighting
   // This bounce back the ray into the scene to gather indirect lighting
@@ -588,7 +647,7 @@ bool handleShadowCatcher(IRaytracer      raytracer,
   float3 offsetDir = dot(sampleData.k2, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
   ray.Origin       = safeOffsetRay(hit.pos, offsetDir);
   ray.Direction    = sampleData.k2;
-  throughput *= sampleData.bsdf_over_pdf;
+  transportFactor = sampleData.bsdf_over_pdf;
   lastSamplePdf = sampleData.pdf;
 
   return true;  // Signal to continue - keep tracing for indirect lighting
@@ -779,7 +838,7 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
 // instead, the segment transmittance is applied and it returns false.
 // For the math behind this, see PBRT v4 ch.11 and Misuik et al. 2014.
 //-----------------------------------------------------------------------
-bool handleVolumeScatter(PbrMaterial pbrMat, float hitDistance, inout RayDesc ray, inout float3 throughput, inout float lastSamplePdf, inout uint seed)
+bool handleVolumeScatter(PbrMaterial pbrMat, float hitDistance, inout RayDesc ray, out float3 transportFactor, inout float lastSamplePdf, inout uint seed)
 {
   float3 extinction   = volumeExtinctionCoefficient(pbrMat);  // sigma_t = -ln(c)/d
   float3 scatterCoeff = pbrMat.scatterCoefficient;            // sigma_s = sigma_t * rho_ss
@@ -796,7 +855,7 @@ bool handleVolumeScatter(PbrMaterial pbrMat, float hitDistance, inout RayDesc ra
     if(scatterDist < hitDistance)
     {
       // Combined (real-scatter + null-collision) per-event throughput weight.
-      throughput *= float3(1.0) - (extinction - scatterCoeff) / maxExtinction;
+      transportFactor = float3(1.0) - (extinction - scatterCoeff) / maxExtinction;
 
       // Advance to scatter point and sample new direction via Henyey-Greenstein phase function.
       ray.Origin    = ray.Origin + ray.Direction * scatterDist;
@@ -810,12 +869,12 @@ bool handleVolumeScatter(PbrMaterial pbrMat, float hitDistance, inout RayDesc ra
     }
 
     // Reached surface without scattering: spectral residual correction (see docblock).
-    throughput *= exp(hitDistance * (float3(maxExtinction) - extinction));
+    transportFactor = exp(hitDistance * (float3(maxExtinction) - extinction));
     return false;
   }
 
   // No scattering -- pure Beer's-law absorption over the segment.
-  throughput *= exp(-hitDistance * extinction);
+  transportFactor = exp(-hitDistance * extinction);
   return false;  // No scatter - continue to surface interaction
 }
 
@@ -826,12 +885,12 @@ bool handleVolumeScatter(PbrMaterial pbrMat, float hitDistance, inout RayDesc ra
 // `wiBeforeScatter` is the ray direction going into the scatter event, used
 // for the phase cosine. Returns the radiance contribution for the caller.
 //-----------------------------------------------------------------------
-float3 volumeScatterNEE(IRaytracer raytracer, PbrMaterial volumeMat, float3 scatterPos, float3 wiBeforeScatter, float3 throughput, inout uint seed)
+float3 volumeScatterNEE(IRaytracer raytracer, PbrMaterial volumeMat, float3 scatterPos, float3 wiBeforeScatter, inout uint seed)
 {
   DirectLight directLight;
   sampleLights(scatterPos, /*normal=*/wiBeforeScatter, wiBeforeScatter, seed, directLight, /*isVolumeSample=*/true);
 
-  if(directLight.pdf <= 0.0F)
+  if(directLight.pdf == 0.0F)
     return float3(0.0F);
 
   // HG is its own normalized PDF over the unit sphere, so phase value == phase PDF.
@@ -852,7 +911,7 @@ float3 volumeScatterNEE(IRaytracer raytracer, PbrMaterial volumeMat, float3 scat
   float3 shadowFactor = raytracer.TraceShadow(shadowRay, seed, /*initialInside=*/true);
 
   // throughput * Li * phase(L) * shadowFactor * MIS weight
-  return throughput * directLight.radianceOverPdf * misWeight * phasePdf * shadowFactor;
+  return directLight.radianceOverPdf * misWeight * phasePdf * shadowFactor;
 }
 
 //-----------------------------------------------------------------------
@@ -912,7 +971,9 @@ bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout
 SampleResult pathTrace(IRaytracer raytracer,
                        RayDesc    ray,
                        inout uint seed,
-                       float      pixelAngle
+                       float      pixelAngle,
+                       uint       nrcPixelIdx,
+                       uint       nrcViewMode
 #if WIREFRAME
                        ,
                        float3 wireDiffX,
@@ -943,23 +1004,41 @@ SampleResult pathTrace(IRaytracer raytracer,
 
   int scatterBounces = 0;
 
-  // Path tracing loop, until the ray hits the environment or the maximum depth is reached or the ray is absorbed.
+  float  nrcSpreadSqrtSum     = 0.0;
+  float  nrcA0                = 0.0;
+  bool   nrcHavePrevVertex    = false;
+  bool   nrcEmittedQuery      = false;
+  bool   nrcOnFlag            = nrcViewUsesNetwork(nrcViewMode);
+  bool   nrcCacheDebugView    = nrcViewIsCacheDebug(nrcViewMode);
+  bool   nrcScreenPrefixValid = false;
+  float3 nrcScreenPrefixRadiance = float3(0);
+
+  bool nrcIsTraining = nrcOnFlag && pushConst.maxDepth > 0 && nrc::isTrainingRay(nrcPixelIdx, uint(pushConst.frameCount), pushConst.nrcTrainingRayThreshold);
+  bool nrcIsUnbiased = nrcIsTraining && nrc::isUnbiasedRrPath(nrcPixelIdx, uint(pushConst.frameCount));
+
+  nrc::PendingTrainingRecord nrcStack[nrc::kMaxPendingTrainingRecords];
+  int    nrcStackSize        = 0;
+  nrc::NrcVertexFeatures nrcLastFeatures = {};
+  bool   nrcSuffixTerminated = false;
+
+  // Rendering stops at its depth cap or a cache query; training may continue
+  // to a bootstrap endpoint or natural termination (environment, absorption, RR).
   // surfaceDepth advances ONLY on actual surface bounces (at the bottom of the loop). Volume scatter events
   // `continue` past that increment, so volume chains never consume the surface bounce budget; they are bounded
   // only by Russian Roulette past VOLUME_FREE_BUDGET events.
   int surfaceDepth = 0;
-  while(surfaceDepth < pushConst.maxDepth)
+  while(surfaceDepth < pushConst.maxDepth || nrcIsTraining)
   {
+    // Training may extend beyond the rendering cap without changing the pixel.
+    if(surfaceDepth >= pushConst.maxDepth && !nrcScreenPrefixValid)
+    {
+      nrcScreenPrefixRadiance = radiance;
+      nrcScreenPrefixValid = true;
+    }
     // Ensure ray direction is normalized
     ray.Direction = normalize(ray.Direction);
 
     bool   nextEventValid = false;      // If the next event is valid, then we can sample the BSDF for the light
-    float3 contribution   = float3(0);  // Direct lighting contribution
-
-    // Shadow ray data (minimal extraction to reduce live state)
-    float16_t3 shadowRayPos;
-    float16_t3 shadowRayDir;
-    float16_t  shadowRayDist;
 
     {
       //DirectLight directLight;
@@ -1006,6 +1085,7 @@ SampleResult pathTrace(IRaytracer raytracer,
           if(hasFlag(frameInfo->flags, SceneFrameInfoFlags::eSceneUseSolidBackground))
           {
             radiance = frameInfo->backgroundColor;
+            nrcSuffixTerminated = true;
             break;
           }
           else if(hasFlag(pushConst.frameInfo->flags, SceneFrameInfoFlags::eSceneUseHdrEnvironment)
@@ -1014,6 +1094,7 @@ SampleResult pathTrace(IRaytracer raytracer,
             float3 dir = rotate(ray.Direction, float3(0, 1, 0), -frameInfo->envRotation);
             float2 uv  = getSphericalUv(dir);  // See sampling.glsl
             radiance = smoothHDRBlur(texturesHdr[HDR_IMAGE_INDEX], uv, frameInfo->envBlur).xyz * frameInfo->envIntensity;
+            nrcSuffixTerminated = true;
             break;
           }
         }
@@ -1034,8 +1115,11 @@ SampleResult pathTrace(IRaytracer raytracer,
         // We may hit the environment twice: once via sampleLights() and once when hitting the sky while probing
         // for more indirect hits. This is the counter part of the MIS weighting in sampleLights()
         float misWeight = computeEnvHitMisWeight(lastSamplePdf, envPdf);
-        radiance += throughput * misWeight * envColor;
+        float3 localEnvironment = misWeight * envColor;
+        radiance += throughput * localEnvironment;
+        nrcFoldContribution(nrcStack, nrcStackSize, localEnvironment);
 
+        nrcSuffixTerminated = true;
         break;
       }
 
@@ -1053,9 +1137,26 @@ SampleResult pathTrace(IRaytracer raytracer,
         // Shadow catcher: invisible plane that shows only shadows for compositing
         if(hasFlag(frameInfo->flags, SceneFrameInfoFlags::eSceneInfinitePlaneShadowCatcher))
         {
-          bool continuePath = handleShadowCatcher(raytracer, hit, pbrMat, ray, radiance, throughput, lastSamplePdf, seed, frameInfo);
+          float3 localRadiance;
+          float3 transportFactor;
+          bool continuePath = handleShadowCatcher(raytracer, hit, pbrMat, ray, localRadiance, transportFactor, lastSamplePdf, seed, frameInfo);
+          radiance += throughput * localRadiance;
+          nrcFoldContribution(nrcStack, nrcStackSize, localRadiance);
           if(!continuePath)
+          {
+            nrcSuffixTerminated = true;
             break;
+          }
+          throughput *= transportFactor;
+          nrcAdvanceThroughput(nrcStack, nrcStackSize, transportFactor);
+          surfaceDepth++;
+          if(surfaceDepth >= RR_MIN_DEPTH)
+          {
+            float survival = min(max(throughput.x, max(throughput.y, throughput.z)) + 0.001, 0.95);
+            if(rand(seed) >= survival) { nrcSuffixTerminated = true; break; }
+            throughput /= survival;
+            nrcAdvanceThroughput(nrcStack, nrcStackSize, float3(1.0 / survival));
+          }
           continue;
         }
       }
@@ -1076,7 +1177,7 @@ SampleResult pathTrace(IRaytracer raytracer,
         material.pbrBaseColorFactor *= hit.color;  // Modulate the base color with the vertex color
 
         // Evaluate the material at the hit point (ray-footprint gradient for anisotropic texture LOD).
-        // texGradScale is a user knob: 0 falls through to Sample() (mip 0), 1 is the full physical gradient.
+        // texGradScale is a user knob: 0 requests mip 0, 1 is the full physical gradient.
         float texGrad  = computeRayFootprintGrad(payload.hitT, pixelAngle, hit.texelDensity) * pushConst.texGradScale;
         MeshState mesh = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, isInside, texGrad);
         pbrMat         = evaluateMaterial(material, mesh, allTextures, texInfos);
@@ -1127,153 +1228,159 @@ SampleResult pathTrace(IRaytracer raytracer,
       }
 
 
-      // Adding emissive
-      radiance += pbrMat.emissive * throughput;
+      // Apply segment transport before any surface contribution. A volume
+      // event has not reached this surface and must not collect its emission.
+      if(isInside && volumeMat.thickness > 0.0F)
+      {
+        float3 wiBeforeScatter = ray.Direction;
+        float3 segmentFactor;
+        bool scattered = handleVolumeScatter(volumeMat, payload.hitT, ray, segmentFactor, lastSamplePdf, seed);
+        throughput *= segmentFactor;
+        nrcAdvanceThroughput(nrcStack, nrcStackSize, segmentFactor);
+        if(scattered)
+        {
+          scatterBounces++;
+          float3 localVolume = volumeScatterNEE(raytracer, volumeMat, ray.Origin, wiBeforeScatter, seed);
+          radiance += throughput * localVolume;
+          nrcFoldContribution(nrcStack, nrcStackSize, localVolume);
+          if(scatterBounces >= VOLUME_FREE_BUDGET)
+          {
+            float survival = min(max(throughput.x, max(throughput.y, throughput.z)) + RR_PCONT_FLOOR, RR_PCONT_CAP);
+            if(rand(seed) >= survival) { nrcSuffixTerminated = true; break; }
+            throughput /= survival;
+            nrcAdvanceThroughput(nrcStack, nrcStackSize, float3(1.0 / survival));
+          }
+          continue;
+        }
+      }
 
+      // Emission belongs to previously stored vertices, never to this
+      // vertex's scattered-radiance record. The screen prefix keeps it too.
+      radiance += throughput * pbrMat.emissive;
+      nrcFoldContribution(nrcStack, nrcStackSize, pbrMat.emissive);
 #if MAT_EXT_UNLIT
-      // Unlit
       if(material.unlit > 0)
       {
-        radiance += pbrMat.baseColor;
+        radiance += throughput * pbrMat.baseColor;
+        nrcFoldContribution(nrcStack, nrcStackSize, pbrMat.baseColor);
+        nrcSuffixTerminated = true;
         break;
       }
 #endif
 
-      // KHR_materials_volume + KHR_materials_volume_scatter:
-      // While inside a volume with thickness > 0 (non-thin-walled), perform null-collision tracking.
-      // On a real scatter event, run NEE here and `continue` so the next loop iteration traces from
-      // the new (scattered) ray. Volume events never advance surfaceDepth, so they never consume the
-      // surface bounce budget; chains are bounded only by Russian Roulette past VOLUME_FREE_BUDGET events.
-      if(isInside && (volumeMat.thickness > 0.0F))
+      // Incoming-edge spread (paper eq.3). Delta samples have zero spread.
+      if(nrcOnFlag)
       {
-        // Capture the pre-scatter direction: handleVolumeScatter overwrites ray.Direction on a real
-        // scatter event, but volumeScatterNEE needs the incoming wi to evaluate the HG phase cosine.
-        const float3 wiBeforeScatter = ray.Direction;
-
-        // volumeMat is the enclosing medium captured at boundary entry, not pbrMat (the surface we
-        // just hit, which would have the wrong sigma_t / sigma_s for the in-volume segment).
-        if(handleVolumeScatter(volumeMat, payload.hitT, ray, throughput, lastSamplePdf, seed))
+        float arrivalCosine = max(abs(dot(ray.Direction, pbrMat.N)), 1e-3);
+        if(!nrcHavePrevVertex)
         {
-          scatterBounces++;
-
-          // NEE at the scatter point
-          radiance += volumeScatterNEE(raytracer, volumeMat, ray.Origin, wiBeforeScatter, throughput, seed);
-
-          // Russian roulette for runaway scatter chains. Surviving events still don't bill against
-          // surfaceDepth; RR is the sole termination mechanism for long volume chains.
-          if(scatterBounces >= VOLUME_FREE_BUDGET)
-          {
-            float rrPcont = min(max(throughput.x, max(throughput.y, throughput.z)) + RR_PCONT_FLOOR, RR_PCONT_CAP);
-            if(rand(seed) >= rrPcont)
-              break;
-            throughput /= rrPcont;
-          }
-          continue;  // skips the surfaceDepth++ at the bottom of the loop
+          nrcA0 = payload.hitT * payload.hitT / (4.0 * 3.14159265 * arrivalCosine);
+          nrcHavePrevVertex = true;
         }
-        // If no scatter, segment transmittance was applied inside handleVolumeScatter.
+        else
+          nrcSpreadSqrtSum += nrc::spreadContribution(payload.hitT, lastSamplePdf, arrivalCosine);
       }
 
-      // Light contribution; can be environment or punctual lights
+      float3 normalizedPosition = nrcNormalizePosition(hit.pos);
+      if(nrcOnFlag && !isInside && nrcCanCacheSurface(pbrMat, normalizedPosition))
+      {
+        float3 diffuseReflectance, specularReflectance;
+        nrcMaterialReflectance(pbrMat, diffuseReflectance, specularReflectance);
+        // The cache predicts radiance leaving toward the previous path vertex
+        // (BSDF k1), so use the reverse incoming ray before sampling a new direction.
+        nrc::NrcVertexFeatures features = nrc::makeVertexFeatures(
+            normalizedPosition, -ray.Direction, pbrMat.N, pbrMat.roughness.x,
+            diffuseReflectance, specularReflectance);
+
+        // Decide the endpoint before its NEE, BSDF, RR, or record creation.
+        // The tail then starts at exactly the vertex reached by every pending
+        // record's local throughput. No endpoint record must be dropped later.
+        bool suffixSpreadReached = nrc::shouldTerminateTrainingSuffix(
+            nrcIsUnbiased, nrcEmittedQuery, nrcSpreadSqrtSum, nrcA0);
+        bool cappedPrefix = !nrcIsUnbiased && !nrcEmittedQuery && surfaceDepth >= pushConst.maxDepth;
+        if(nrcIsTraining && nrcStackSize > 0 && (suffixSpreadReached || cappedPrefix))
+        {
+          nrcLastFeatures = features;
+          break;
+        }
+
+        // Debug queries the first eligible surface, including the primary hit.
+        // Only the spread threshold is bypassed; surface, medium, and depth
+        // restrictions still apply. Paths that never enter this branch keep their prefix.
+        if(!nrcEmittedQuery && surfaceDepth < pushConst.maxDepth
+            && (nrcCacheDebugView || nrc::spreadExceeds(nrcSpreadSqrtSum, nrcA0)))
+        {
+          // Preserve camera-path throughput before this surface's BSDF. It also
+          // weights Debug's cache estimate when the first eligible hit is later.
+          nrcWriteQueryRecord(features, nrcPixelIdx, throughput, pushConst.nrcQueryCapacity);
+          // Full scattered radiance is in the cache: do not add this vertex's
+          // NEE to the prefix as well. At this query point, Debug suppresses all
+          // prefix radiance, including emission, to display only the cache contribution.
+          nrcScreenPrefixRadiance = nrcCacheDebugView ? float3(0) : radiance;
+          nrcScreenPrefixValid = true;
+          nrcEmittedQuery = true;
+          nrcSpreadSqrtSum = 0.0; // restart the suffix at the query (paper 3.4)
+          if(!nrcIsTraining)
+            break;
+        }
+
+        if(nrcIsTraining && nrcStackSize < nrc::kMaxPendingTrainingRecords)
+        {
+          nrcStack[nrcStackSize] = nrc::makePendingTrainingRecord(features, uint(surfaceDepth));
+          nrcStackSize++;
+        }
+      }
+
       DirectLight directLight;
       sampleLights(hit.pos, pbrMat.N, ray.Direction, seed, directLight);
-
-      // Do not next event estimation (but delay the adding of contribution)
       nextEventValid = (dot(directLight.direction, hit.nrm) > 0.0f || pbrMat.diffuseTransmissionFactor > 0.0f)
-                       && directLight.pdf != 0.0f;
-
-      // Evaluate BSDF for Light
+          && directLight.pdf != 0.0f;
       if(nextEventValid)
       {
-        // Evaluate the BSDF at the hit point
         BsdfEvaluateData evalData;
         evalData.k1 = -ray.Direction;
         evalData.k2 = directLight.direction;
         evalData.xi = float3(rand(seed), rand(seed), rand(seed));
         bsdfEvaluate(evalData, pbrMat);
-        // bsdfEvaluateSimple(evalData, pbrMat);
-
-        // If the PDF is greater than 0, then we can sample the BSDF
         if(evalData.pdf > 0.0)
         {
-          // Weight for combining light and BSDF sampling strategies (Multiple Importance Sampling)
-          const float mis_weight = (directLight.pdf == DIRAC) ? 1.0F : directLight.pdf / (directLight.pdf + evalData.pdf);
-
-          // sample weight
-          const float3 w = throughput * directLight.radianceOverPdf * mis_weight;
-          contribution += w * evalData.bsdf_diffuse;
-          contribution += w * evalData.bsdf_glossy;
+          float misWeight = directLight.pdf == DIRAC ? 1.0 : directLight.pdf / (directLight.pdf + evalData.pdf);
+          float3 localDirect = directLight.radianceOverPdf * misWeight * (evalData.bsdf_diffuse + evalData.bsdf_glossy);
+          bool forward = dot(directLight.direction, hit.nrm) > 0.0;
+          float3 offset = forward ? hit.geonrm : -hit.geonrm;
+          RayDesc shadowRay;
+          shadowRay.Origin = safeOffsetRay(forward ? hit.shadowPos : hit.pos, offset);
+          shadowRay.Direction = directLight.direction;
+          shadowRay.TMin = 0.0;
+          shadowRay.TMax = directLight.distance;
+          localDirect *= raytracer.TraceShadow(shadowRay, seed);
+          radiance += throughput * localDirect;
+          nrcFoldContribution(nrcStack, nrcStackSize, localDirect);
         }
       }
 
-
+      BsdfSampleData sampleData;
+      sampleData.k1 = -ray.Direction;
+      sampleData.xi = float3(rand(seed), rand(seed), rand(seed));
+      bsdfSample(sampleData, pbrMat);
+      if(sampleData.event_type == BSDF_EVENT_ABSORB)
       {
-        // Sample the BSDF
-        BsdfSampleData sampleData;
-        sampleData.k1 = -ray.Direction;                              // outgoing direction
-        sampleData.xi = float3(rand(seed), rand(seed), rand(seed));  // random number
-        bsdfSample(sampleData, pbrMat);
-        // bsdfSampleSimple(sampleData, pbrMat);
-
-        // Update the throughput
-        throughput *= sampleData.bsdf_over_pdf;
-        ray.Direction = sampleData.k2;  // new direction
-        lastSamplePdf = sampleData.pdf;
-
-        // #DLSS - Enable specular hit distance capture on first bounce if this is a glossy reflection
-        // Matches reference implementation: only capture for BSDF_EVENT_GLOSSY_REFLECTION
-        if(firstRay && (sampleData.event_type == BSDF_EVENT_GLOSSY_REFLECTION || sampleData.event_type == BSDF_EVENT_IMPULSE_REFLECTION))
-        {
-          captureSpecularHit = true;
-        }
-
-        if(sampleData.event_type != BSDF_EVENT_ABSORB)
-        {
-          // Continue path
-          bool isSpecular     = (sampleData.event_type & BSDF_EVENT_IMPULSE) != 0;
-          bool isTransmission = (sampleData.event_type & BSDF_EVENT_TRANSMISSION) != 0;
-
-          float3 offsetDir = dot(ray.Direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
-          ray.Origin       = safeOffsetRay(hit.pos, offsetDir);
-
-          // Flip the information if we are inside the object, but only if it is a solid object
-          // The doubleSided flag is used to know if the object is solid or thin-walled.
-          // This is not a glTF specification, but works in many cases.
-          if(isTransmission)
-          {
-            isInside = !isInside;
-            if(isInside)
-              volumeMat = pbrMat;  // Entering volume: capture its material for scatter/absorption
-          }
-        }
-        else if(sampleData.event_type == BSDF_EVENT_ABSORB)  // If the ray is absorbed , then break
-        {
-          // Exit tracing rays, but still finish this iteration; in particular the visibility test
-          // for the light that we may have hit.
-          surfaceDepth = pushConst.maxDepth;
-        }
-
-        // End scope to free live states
+        nrcSuffixTerminated = true;
+        break;
       }
-
-      // Find shadow ray position and direction
-      bool   shadowSideForward = dot(directLight.direction, hit.nrm) > 0.0F;
-      float3 shadowOffsetDir   = shadowSideForward ? hit.geonrm : -hit.geonrm;
-      float3 shadowOffsetBase  = shadowSideForward ? hit.shadowPos : hit.pos;
-      shadowRayPos             = float16_t3(safeOffsetRay(shadowOffsetBase, shadowOffsetDir));
-      shadowRayDir             = float16_t3(directLight.direction);
-      shadowRayDist            = float16_t(directLight.distance);
-    }
-
-    // We are adding the contribution to the radiance only if the ray is not occluded by an object.
-    if(nextEventValid)
-    {
-      RayDesc shadowRay;
-      shadowRay.Origin    = shadowRayPos;
-      shadowRay.Direction = shadowRayDir;
-      shadowRay.TMin      = 0.0;
-      shadowRay.TMax      = shadowRayDist;
-      float3 shadowFactor = raytracer.TraceShadow(shadowRay, seed);
-      radiance += contribution * shadowFactor;
+      throughput *= sampleData.bsdf_over_pdf;
+      nrcAdvanceThroughput(nrcStack, nrcStackSize, sampleData.bsdf_over_pdf);
+      ray.Direction = sampleData.k2;
+      lastSamplePdf = sampleData.pdf;
+      if(firstRay && (sampleData.event_type == BSDF_EVENT_GLOSSY_REFLECTION || sampleData.event_type == BSDF_EVENT_IMPULSE_REFLECTION))
+        captureSpecularHit = true;
+      float3 offsetDir = dot(ray.Direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
+      ray.Origin = safeOffsetRay(hit.pos, offsetDir);
+      if((sampleData.event_type & BSDF_EVENT_TRANSMISSION) != 0)
+      {
+        isInside = !isInside;
+        if(isInside) volumeMat = pbrMat;
+      }
     }
 
     // Russian-Roulette (minimizing live state)
@@ -1281,13 +1388,28 @@ SampleResult pathTrace(IRaytracer raytracer,
     {
       float rrPcont = min(max(throughput.x, max(throughput.y, throughput.z)) + 0.001F, 0.95F);
       if(rand(seed) >= rrPcont)
+      {
+        nrcSuffixTerminated = true;
         break;                // paths with low throughput that won't contribute
-      throughput /= rrPcont;  // boost the energy of the non-terminated paths
+      }
+      throughput /= rrPcont;
+      nrcAdvanceThroughput(nrcStack, nrcStackSize, float3(1.0 / rrPcont));
     }
 
     // Surface bounce consumed: advance the surface budget. Volume scatter `continue`s before
     // reaching this point, so it never advances surfaceDepth.
     surfaceDepth++;
+  }
+
+  if(nrcIsTraining && nrcStackSize > 0)
+  {
+    nrcEmitTrainingStack(nrcStack, nrcStackSize, nrcLastFeatures,
+                         nrcIsUnbiased, nrcSuffixTerminated, pushConst.nrcTrainingCapacity);
+  }
+
+  if(nrcScreenPrefixValid)
+  {
+    radiance = nrcScreenPrefixRadiance;
   }
 
 #if WIREFRAME
@@ -1349,7 +1471,10 @@ SampleResult samplePixel(IRaytracer raytracer,
   computeDifferentials(samplePos, imageSize, viewMatrixI, projMatrixI, wireDiffX, wireDiffY);
 #endif
 
-  SampleResult sampleResult = pathTrace(raytracer, ray, seed, pixelAngle
+  uint nrcPixelIdx = uint(samplePos.y) * uint(imageSize.x) + uint(samplePos.x);
+  uint nrcViewMode = nrcViewModeForPixel(samplePos, imageSize);
+
+  SampleResult sampleResult = pathTrace(raytracer, ray, seed, pixelAngle, nrcPixelIdx, nrcViewMode
 #if WIREFRAME
                                         ,
                                         wireDiffX, wireDiffY
@@ -1358,7 +1483,7 @@ SampleResult samplePixel(IRaytracer raytracer,
 
   // Removing fireflies
   float lum = dot(sampleResult.radiance.xyz, float3(1.0F / 3.0F));
-  if(lum > pushConst.fireflyClampThreshold)
+  if(!hasFlag(pushConst.flags, PathtracerFlags::ePtNrcEnabled) && lum > pushConst.fireflyClampThreshold)
   {
     sampleResult.radiance *= pushConst.fireflyClampThreshold / lum;
   }
@@ -1435,7 +1560,17 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   }
 
   // Saving result
-  if(firstFrame || hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss))
+  bool nrcOn     = hasFlag(pushConst.flags, PathtracerFlags::ePtNrcEnabled);
+  uint nrcPixIdx = uint(samplePos.y) * uint(imageSize.x) + uint(samplePos.x);
+  if(nrcOn)
+  {
+    // Clear every pixel before cache-query runs, including None-mode pixels and
+    // paths that never selected a cache query. Their prefix is the traced result;
+    // a missing contribution must never reuse a previous frame's cache value.
+    g_pathPrefix[nrcPixIdx] = pixelColor;
+    g_nrcContrib[nrcPixIdx] = float4(0.0);
+  }
+  else if(firstFrame || !hasFlag(pushConst.flags, PathtracerFlags::ePtAccumulate) || hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss))
   {  // First frame, replace the value in the buffer
     outImages[int(OutputImage::eResultImage)][int2(samplePos)] = pixelColor;
   }
@@ -1483,8 +1618,7 @@ void computeMain(uint3 threadIdx: SV_DispatchThreadID)
 {
   RayQueryRaytracer raytracer;
   float2            samplePos = (float2)threadIdx.xy;
-  uint2             imageSize;
-  outImages[int(OutputImage::eResultImage)].GetDimensions(imageSize.x, imageSize.y);
+  uint2             imageSize = pushConst.renderingSize;
 
   processPixel(raytracer, samplePos, imageSize);
 }

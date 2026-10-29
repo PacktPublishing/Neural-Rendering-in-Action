@@ -4,7 +4,9 @@
     "USE_SER=1"
   ],
   "slang.additionalSearchPaths": [
-    "../nvpro_core2/"
+    "../nvpro_core2/",
+    "../RTXNS/src/NeuralShading_Shaders/",
+    "src/nrc/shaders/"
   ],
   "slang.enableCommitCharactersInAutoCompletion": "on"
 }

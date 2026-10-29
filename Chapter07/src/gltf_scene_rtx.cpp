@@ -230,6 +230,12 @@ bool nvvkgltf::SceneRtx::cmdBuildBottomLevelAccelerationStructure(VkCommandBuffe
   std::span<nvvk::AccelerationStructureBuildData> blasBuildData(m_blasBuildData);
   std::span<nvvk::AccelerationStructure>          blasAccel(m_blasAccel);
 
+  // Scene uploads can be in an earlier submission on the same queue.
+  // Submission order alone does not make vertex/index copies visible to
+  // BLAS input reads, which use SHADER_READ at the AS-build stage.
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+
   // Building all BLAS in parallel, as long as there are enough budget
   VkResult result = m_blasBuilder->cmdCreateBlas(cmd, blasBuildData, blasAccel, m_blasScratchBuffer.address,
                                                  m_blasScratchBuffer.bufferSize, hintMaxBudget);

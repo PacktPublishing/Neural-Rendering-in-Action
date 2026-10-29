@@ -50,7 +50,7 @@ struct MeshState
   float3 Ng;     // Geometric normal
   float2 tc[2];  // Texture coordinates
   bool   isInside = false;
-  float  texGrad  = 0.0f;  // Ray footprint for SampleGrad; 0 -> Sample() (mip 0 in RT, proper mips in fragment)
+  float  texGrad  = 0.0f;  // Ray footprint for SampleGrad; 0 uses the shader-stage fallback below.
 };
 
 
@@ -64,8 +64,8 @@ struct MeshState
 #endif
 
 /*
-texGrad > 0: SampleGrad (path trace ray footprint). texGrad == 0: Sample() — fragment gets real mips;
-in ray trace / compute implicit LOD is undefined and effectively samples like mip 0, same as needed there.
+texGrad > 0: SampleGrad (path trace ray footprint). For zero footprint, ray tracing and
+compute callers define GLTF_EXPLICIT_TEXTURE_LOD to request mip 0; fragment shaders use implicit LOD.
 */
 float4 getTexture(Sampler2D textures[], in GltfTextureInfo textureInfo, in float2 texCoords[2], float texGrad)
 {
@@ -87,7 +87,11 @@ float4 getTexture(Sampler2D textures[], in GltfTextureInfo textureInfo, in float
 #endif
     return textures[textureInfo.index].SampleGrad(tt, ddx_uv, ddy_uv);
   }
+#if GLTF_EXPLICIT_TEXTURE_LOD
+  return textures[textureInfo.index].SampleLevel(tt, 0.0f);
+#else
   return textures[textureInfo.index].Sample(tt);
+#endif
 #else
   return float4(1.0F);
 #endif
