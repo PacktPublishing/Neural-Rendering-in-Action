@@ -15,6 +15,7 @@
 #define __RAY_TRACE_H__
 
 #include "Environment.slang"
+#include "GlobalBufferAccessors.slang"
 #include "Globals.slang"
 #include "Random.slang"
 #include "Sampling.slang"

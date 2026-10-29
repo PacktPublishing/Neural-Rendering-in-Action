@@ -28,6 +28,7 @@ bool sameHemisphere(float3 a, float3 b, float3 n)
 // See
 // http://blog.selfshadow.com/publications/s2012-shading-course/burley/s2012_pbs_disney_brdf_notes_v3.pdf
 // NOTE: From libraries/pbrlib/genglsl/mx_roughness_anisotropy.glsl in the MaterialX repo.
+[Differentiable]
 float2 mx_roughness_anisotropy(float roughness, float anisotropy)
 {
     float2 result = 0.0f.xx;
@@ -55,11 +56,13 @@ float2 mx_roughness_anisotropy(float roughness, float anisotropy)
     return result;
 }
 
+[Differentiable]
 float mx_square(float x)
 {
     return x * x;
 }
 
+[Differentiable]
 float mx_pow5(float x)
 {
     return mx_square(mx_square(x)) * x;
@@ -68,12 +71,14 @@ float mx_pow5(float x)
 // Mix two BSDFs based on weight
 // NOTE: Based on mix functions in mx_mix_bsdf_transmission from
 // libraries/pbrlib/genglsl/mx_mix_brdf.glsl in the MaterialX repo.
+[Differentiable]
 float3 mx_mix(BSDF bg, BSDF fg, float w)
 {
     return lerp(bg, fg, clamp(w, 0.0f, 1.0f));
 }
 
-float mx_orennayar(float3 L, float3 V, float3 N, float NdotL, float roughness)
+[Differentiable]
+float mx_orennayar(no_diff float3 L, no_diff float3 V, no_diff float3 N, no_diff float NdotL, float roughness)
 {
     float LdotV = dot(L, V);
     float NdotV = abs(dot(N, V));
@@ -88,8 +93,9 @@ float mx_orennayar(float3 L, float3 V, float3 N, float NdotL, float roughness)
     return A + B * t;
 }
 
+[Differentiable]
 BSDF mx_diffuse_brdf_reflection(
-    float3 L, float3 V, float weight, float3 color, float roughness, float3 normal)
+    no_diff float3 L, no_diff float3 V, float weight, float3 color, float roughness, no_diff float3 normal)
 {
     // There is no contribution if the weight is close to zero, or if the light and view directions
     // are not in the same hemisphere relative to the normal.
@@ -112,12 +118,14 @@ BSDF mx_diffuse_brdf_reflection(
 }
 
 // Compute the average of an anisotropic roughness pair
+[Differentiable]
 float mx_average_roughness(float2 roughness)
 {
     return sqrt(roughness.x * roughness.y);
 }
 
 // Convert a real-valued index of refraction to normal-incidence reflectivity.
+[Differentiable]
 float mx_ior_to_f0(float ior)
 {
     return mx_square((ior - 1.0) / (ior + 1.0));
@@ -125,7 +133,8 @@ float mx_ior_to_f0(float ior)
 
 // https://disney-animation.s3.amazonaws.com/library/s2012_pbs_disney_brdf_notes_v2.pdf
 // Appendix B.2 Equation 13
-float mx_ggx_NDF(float3 X, float3 Y, float3 H, float NdotH, float alphaX, float alphaY)
+[Differentiable]
+float mx_ggx_NDF(no_diff float3 X, no_diff float3 Y, no_diff float3 H, no_diff float NdotH, float alphaX, float alphaY)
 {
     float XdotH = dot(X, H);
     float YdotH = dot(Y, H);
@@ -134,7 +143,8 @@ float mx_ggx_NDF(float3 X, float3 Y, float3 H, float NdotH, float alphaX, float 
 }
 
 // Standard Schlick Fresnel
-float mx_fresnel_schlick(float cosTheta, float F0)
+[Differentiable]
+float mx_fresnel_schlick(no_diff float cosTheta, float F0)
 {
     float x  = clamp(1.0 - cosTheta, 0.0, 1.0);
     float x5 = mx_pow5(x);
@@ -143,7 +153,8 @@ float mx_fresnel_schlick(float cosTheta, float F0)
 
 // http://jcgt.org/published/0003/02/03/paper.pdf
 // Equations 72 and 99
-float mx_ggx_smith_G(float NdotL, float NdotV, float alpha)
+[Differentiable]
+float mx_ggx_smith_G(no_diff float NdotL, no_diff float NdotV, float alpha)
 {
     float alpha2  = mx_square(alpha);
     float lambdaL = sqrt(alpha2 + (1.0 - alpha2) * mx_square(NdotL));
@@ -155,7 +166,8 @@ float mx_ggx_smith_G(float NdotL, float NdotV, float alpha)
 // the curve fit (below) is supported here.
 
 // https://www.unrealengine.com/blog/physically-based-shading-on-mobile
-float3 mx_ggx_directional_albedo_curve_fit(float NdotV, float roughness, float3 F0, float3 F90)
+[Differentiable]
+float3 mx_ggx_directional_albedo_curve_fit(no_diff float NdotV, float roughness, float3 F0, float3 F90)
 {
     const float4 c0 = float4(-1, -0.0275, -0.572, 0.022);
     const float4 c1 = float4(1, 0.0425, 1.04, -0.04);
@@ -165,26 +177,30 @@ float3 mx_ggx_directional_albedo_curve_fit(float NdotV, float roughness, float3 
     return F0 * AB.x + F90 * AB.y;
 }
 
-float mx_ggx_directional_albedo(float NdotV, float roughness, float F0, float F90)
+[Differentiable]
+float mx_ggx_directional_albedo(no_diff float NdotV, float roughness, float F0, no_diff float F90)
 {
     return mx_ggx_directional_albedo_curve_fit(NdotV, roughness, F0.xxx, F90.xxx).x;
 }
 
 // https://blog.selfshadow.com/publications/turquin/ms_comp_final.pdf
 // Equations 14 and 16
-float3 mx_ggx_energy_compensation(float NdotV, float roughness, float3 Fss)
+[Differentiable]
+float3 mx_ggx_energy_compensation(no_diff float NdotV, float roughness, float3 Fss)
 {
     float Ess = mx_ggx_directional_albedo(NdotV, roughness, 1.0, 1.0);
     return 1.0 + Fss * (1.0 - Ess) / Ess;
 }
 
-float mx_ggx_energy_compensation(float NdotV, float roughness, float Fss)
+[Differentiable]
+float mx_ggx_energy_compensation(no_diff float NdotV, float roughness, float Fss)
 {
     return mx_ggx_energy_compensation(NdotV, roughness, Fss.xxx).x;
 }
 
-BSDF mx_dielectric_brdf_reflection(float3 L, float3 V, float weight, float3 tint, float ior,
-    float2 roughness, float3 N, float3 X, int distribution, BSDF base)
+[Differentiable]
+BSDF mx_dielectric_brdf_reflection(no_diff float3 L, no_diff float3 V, float weight, float3 tint, float ior,
+    float2 roughness, no_diff float3 N, no_diff float3 X, no_diff int distribution, BSDF base)
 {
     BSDF result = 0.0f.xxx;
 
@@ -219,6 +235,7 @@ BSDF mx_dielectric_brdf_reflection(float3 L, float3 V, float weight, float3 tint
     return result;
 }
 
+[Differentiable]
 void mx_artistic_to_complex_ior(
     float3 reflectivity, float3 edge_color, out float3 ior, out float3 extinction)
 {
@@ -235,7 +252,8 @@ void mx_artistic_to_complex_ior(
     extinction = sqrt(k2);
 }
 
-float3 mx_fresnel_conductor(float cosTheta, float3 n, float3 k)
+[Differentiable]
+float3 mx_fresnel_conductor(no_diff float cosTheta, float3 n, float3 k)
 {
     float c2     = cosTheta * cosTheta;
     float3 n2_k2 = n * n + k * k;
@@ -249,8 +267,9 @@ float3 mx_fresnel_conductor(float cosTheta, float3 n, float3 k)
     return 0.5 * (rs + rp);
 }
 
-BSDF mx_conductor_brdf_reflection(float3 L, float3 V, float weight, float3 reflectivity,
-    float3 edge_color, float2 roughness, float3 N, float3 X, int distribution)
+[Differentiable]
+BSDF mx_conductor_brdf_reflection(no_diff float3 L, no_diff float3 V, float weight, float3 reflectivity,
+    float3 edge_color, float2 roughness, no_diff float3 N, no_diff float3 X, no_diff int distribution)
 {
     BSDF result = 0.0f.xxx;
 
@@ -289,7 +308,8 @@ BSDF mx_conductor_brdf_reflection(float3 L, float3 V, float weight, float3 refle
 // http://www.aconty.com/pdf/s2017_pbs_imageworks_sheen.pdf
 // Equation 2
 // NOTE: From libraries/pbrlib/genglsl/mx_sheen_brdf.glsl in the MaterialX repo.
-float mx_imageworks_sheen_NDF(float cosTheta, float roughness)
+[Differentiable]
+float mx_imageworks_sheen_NDF(no_diff float cosTheta, float roughness)
 {
     // Given roughness is assumed to be clamped to [M_FLOAT_EPS, 1.0]
     float invRoughness = 1.0 / roughness;
@@ -338,7 +358,8 @@ static const float u_sheenAlbedo[SHEEN_ALBEDO_TABLE_SIZE * SHEEN_ALBEDO_TABLE_SI
 
 // Looks up an albedo using the static LUT.
 // NOTE: From libraries/pbrlib/genglsl/mx_sheen_brdf.glsl in the MaterialX repo.
-float mx_imageworks_sheen_directional_albedo(float cosTheta, float roughness)
+[Differentiable]
+float mx_imageworks_sheen_directional_albedo(no_diff float cosTheta, float roughness)
 {
     // Compute x and y index within LUT from roughness and cosTheta.
     float x  = cosTheta * (SHEEN_ALBEDO_TABLE_SIZE - 1);
@@ -363,8 +384,9 @@ float mx_imageworks_sheen_directional_albedo(float cosTheta, float roughness)
 
 // Compute the reflection component of the sheen BRDF.
 // NOTE: From libraries/pbrlib/genglsl/mx_sheen_brdf.glsl in the MaterialX repo.
+[Differentiable]
 BSDF mx_sheen_brdf_reflection(
-    float3 L, float3 V, float weight, float3 color, float roughness, float3 N, BSDF base)
+    no_diff float3 L, no_diff float3 V, float weight, float3 color, float roughness, no_diff float3 N, BSDF base)
 {
     // Ignore if the weight less than epsilon.
     if (weight < M_FLOAT_EPS)
@@ -459,7 +481,8 @@ BSDF mx_sheen_brdf_specular_layer(
 
 // Fake subsurface scattering with simple diffuse transmission.
 // NOTE: From /libraries/pbrlib/genglsl/mx_subsurface_brdf.glsl in the MaterialX repo.
-BSDF mx_subsurface_brdf_reflection(float3 L, float3 V, float weight, float3 color, float3 normal)
+[Differentiable]
+BSDF mx_subsurface_brdf_reflection(no_diff float3 L, no_diff float3 V, float weight, float3 color, no_diff float3 normal)
 {
     // Invert normal since we're transmitting light from the other side
     float NdotL = dot(L, -normal);
@@ -474,7 +497,8 @@ BSDF mx_subsurface_brdf_reflection(float3 L, float3 V, float weight, float3 colo
 
 // Create a rotation matrix from axis and angle in radians.
 // NOTE: From libraries/stdlib/genglsl/mx_rotate_vector3.glsl in the MaterialX repo.
-float4x4 mx_rotationMatrix(float3 axis, float angle)
+[Differentiable]
+float4x4 mx_rotationMatrix(no_diff float3 axis, float angle)
 {
     // Normalize axis.
     axis = normalize(axis);
@@ -494,7 +518,8 @@ float4x4 mx_rotationMatrix(float3 axis, float angle)
 
 // Rotate a vector around given axis by angle in degrees.
 // NOTE: From libraries/stdlib/genglsl/mx_rotate_vector3.glsl in the MaterialX repo.
-float3 mx_rotate_vector3(float3 vec, float amount, float3 axis)
+[Differentiable]
+float3 mx_rotate_vector3(no_diff float3 vec, float amount, no_diff float3 axis)
 {
     float rotationRadians = radians(amount);
     float4x4 m            = mx_rotationMatrix(axis, rotationRadians);
@@ -595,8 +620,9 @@ BSDF mx_dielectric_brdf_specular_layer(float3 L, float3 V, float3 tint, float io
 // Evaluates the material BSDF with the specified view (toward the viewer) and light (toward the
 // light) directions.
 // NOTE: This includes the cosine term from the rendering equation.
+[Differentiable]
 BSDF_AND_COSINE evaluateMaterial(
-    Material material, ShadingData shading, float3 Vw, float3 Lw)
+    Material material, no_diff ShadingData shading, no_diff float3 Vw, no_diff float3 Lw)
 {
     // Roughness influenced by coat.
     float coat_affect_roughness_factor =

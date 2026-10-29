@@ -710,6 +710,9 @@ list(APPEND AURORA_DEPENDENCIES "${{{packageName}_ROOT}}")
     packages = ""
     for ext in externals:
         packages += package.format(packageName=ext.packageName, installFolder=ext.installFolder)
+        # OpenEXR 3.x includes Imath as a separate package, so add Imath_ROOT pointing to the same location
+        if ext.packageName == "OpenEXR":
+            packages += package.format(packageName="Imath", installFolder=ext.installFolder)
 
     externalConfig = os.path.join(context.auroraSrcDir, "Scripts", "cmake", "externalsConfig.cmake")
     print("Written CMake config file: "+externalConfig)

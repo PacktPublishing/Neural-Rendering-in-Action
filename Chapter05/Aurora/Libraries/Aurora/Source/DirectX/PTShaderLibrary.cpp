@@ -395,7 +395,13 @@ void PTShaderLibrary::initRootSignatures(int globalTextureCount, int globalSampl
     // Create the global root signature.
     // Must match the root signature data setup in PTRenderer::submitRayDispatch and the GPU
     // version in GlobalRootSignature.slang.
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+    // 3 extra parameters for differentiable rendering: gPathRecords (u10), gMaterialGrads (u11),
+    // and gDiffRenderConstants (b4).
+    array<CD3DX12_ROOT_PARAMETER, 17> globalRootParameters = {}; // NOLINT(modernize-avoid-c-arrays)
+#else
     array<CD3DX12_ROOT_PARAMETER, 14> globalRootParameters = {}; // NOLINT(modernize-avoid-c-arrays)
+#endif
     globalRootParameters[0].InitAsShaderResourceView(0);         // gScene: acceleration structure
     globalRootParameters[1].InitAsConstants(2, 0);               // sampleIndex + seedOffset
     globalRootParameters[2].InitAsConstantBufferView(1); // gFrameData: per-frame constant buffer
@@ -431,6 +437,15 @@ void PTShaderLibrary::initRootSignatures(int globalTextureCount, int globalSampl
     }; // NOLINT(modernize-avoid-c-arrays)
     globalRootParameters[13].InitAsDescriptorTable(
         _countof(globalSamplerRanges), globalSamplerRanges);
+
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+    // Differentiable rendering UAV buffers and constants, bound as raw root descriptors.
+    // These match the register declarations in MainEntryPoints.slang under
+    // #ifdef ENABLE_DIFFERENTIABLE_RENDERING.
+    globalRootParameters[14].InitAsUnorderedAccessView(10); // gPathRecords:    register(u10)
+    globalRootParameters[15].InitAsUnorderedAccessView(11); // gMaterialGrads:  register(u11)
+    globalRootParameters[16].InitAsConstantBufferView(4);   // gDiffRenderConstants: register(b4)
+#endif
 
     // Create the global root signature object, there are no static samplers (all the samplers
     // including default sampler are stored in gSamplerArray.)
@@ -529,6 +544,12 @@ void PTShaderLibrary::initialize()
     _options.set("ENABLE_RUNTIME_COMPILE_EVALUATE_MATERIAL_FUNCTION", 1);
     // Disable validation of texture indices unless debugging for development purposes.
     _options.set("ENABLE_VALIDATE_TEXTURE_INDICES", 0);
+#if defined(ENABLE_DIFFERENTIABLE_RENDERING)
+    // Propagate the differentiable rendering define into the runtime-compiled shader so that
+    // the path recording code in RayGenShader is active when the shader is recompiled from
+    // source (which happens whenever any setOption() call changes _optionsSource).
+    _options.set("ENABLE_DIFFERENTIABLE_RENDERING", 1);
+#endif
 
     _optionsSource = _options.toHLSL();
 

@@ -16,6 +16,7 @@ set(HELPER_FILES
 # List of actual test files.
 set(TEST_FILES
     "Tests/TestBenchmarks.cpp"
+    "Tests/TestDiffRendering.cpp"
     "Tests/TestImage.cpp"
     "Tests/TestLight.cpp"
     "Tests/TestMaterial.cpp"

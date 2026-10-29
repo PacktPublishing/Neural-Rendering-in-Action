@@ -17,7 +17,11 @@
 #include "Globals.slang"
 
 // Material values used during material evaluation.
-struct Material
+//
+// Slang auto-synthesizes IDifferentiable conformance for structs when they are used as
+// parameters in [Differentiable] functions. Fields marked `no_diff` are excluded from
+// the auto-generated Material.Differential type (they have no gradient).
+public struct Material : IDifferentiable
 {
     float base;
     float3 baseColor;
@@ -52,8 +56,8 @@ struct Material
     float emission;
     float3 emissionColor;
     float3 opacity;
-    bool thinWalled;
-    bool isOpaque;
+    no_diff bool thinWalled;  // bool is not differentiable — excluded from gradient type
+    no_diff bool isOpaque;    // bool is not differentiable — excluded from gradient type
 };
 
 Material defaultMaterial()
