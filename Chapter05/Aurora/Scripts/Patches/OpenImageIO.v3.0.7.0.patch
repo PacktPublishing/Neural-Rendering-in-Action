@@ -1,0 +1,76 @@
+diff --git a/src/cmake/build_minizip-ng.cmake b/src/cmake/build_minizip-ng.cmake
+index c09e375fb..62d80a162 100644
+--- a/src/cmake/build_minizip-ng.cmake
++++ b/src/cmake/build_minizip-ng.cmake
+@@ -17,6 +17,12 @@ set_cache (minizip-ng_BUILD_SHARED_LIBS OFF
+ checked_find_package (ZLIB REQUIRED)
+ 
+ 
++if (ZLIB_LIBRARIES)
++    string(REPLACE ";" "|" ZLIB_LIBRARIES_ESCAPED "${ZLIB_LIBRARIES}")
++endif()
++if (ZLIB_INCLUDE_DIRS)
++    string(REPLACE ";" "|" ZLIB_INCLUDE_DIRS_ESCAPED "${ZLIB_INCLUDE_DIRS}")
++endif()
+ build_dependency_with_cmake(minizip-ng
+     VERSION         ${minizip-ng_BUILD_VERSION}
+     GIT_REPOSITORY  ${minizip-ng_GIT_REPOSITORY}
+@@ -25,11 +31,6 @@ build_dependency_with_cmake(minizip-ng
+         -D BUILD_SHARED_LIBS=${minizip-ng_BUILD_SHARED_LIBS}
+         -D CMAKE_POSITION_INDEPENDENT_CODE=ON
+         -D CMAKE_INSTALL_LIBDIR=lib
+-        # Since the other modules create a subfolder for the includes by default and since
+-        # minizip-ng does not, a suffix is added to CMAKE_INSTALL_INCLUDEDIR in order to
+-        # install the headers under a subdirectory named "minizip-ng".
+-        # Note that this does not affect external builds for minizip-ng.
+-        -D CMAKE_INSTALL_INCLUDEDIR=${CMAKE_INSTALL_INCLUDEDIR}/minizip-ng
+         -D MZ_OPENSSL=OFF
+         -D MZ_LIBBSD=OFF
+         -D MZ_BUILD_TESTS=OFF
+@@ -45,8 +46,8 @@ build_dependency_with_cmake(minizip-ng
+         -D MZ_ICONV=OFF
+         -D MZ_FETCH_LIBS=OFF
+         -D MZ_FORCE_FETCH_LIBS=OFF
+-        -D ZLIB_LIBRARY=${ZLIB_LIBRARIES}
+-        -D ZLIB_INCLUDE_DIR=${ZLIB_INCLUDE_DIRS}
++        -D ZLIB_LIBRARY=${ZLIB_LIBRARIES_ESCAPED}
++        -D ZLIB_INCLUDE_DIR=${ZLIB_INCLUDE_DIRS_ESCAPED}
+     )
+ 
+ 
+diff --git a/src/cmake/build_yaml-cpp.cmake b/src/cmake/build_yaml-cpp.cmake
+index 05cab6187..1de3b876a 100644
+--- a/src/cmake/build_yaml-cpp.cmake
++++ b/src/cmake/build_yaml-cpp.cmake
+@@ -25,6 +25,7 @@ build_dependency_with_cmake(yaml-cpp
+         -D YAML_CPP_BUILD_CONTRIB=OFF
+         -D YAML_BUILD_SHARED_LIBS=${yaml-cpp_BUILD_SHARED_LIBS}
+         -D CMAKE_INSTALL_LIBDIR=lib
++        -D CMAKE_POLICY_VERSION_MINIMUM=3.5
+     )
+ 
+ set (yaml-cpp_ROOT ${yaml-cpp_LOCAL_INSTALL_DIR})
+diff --git a/src/cmake/dependency_utils.cmake b/src/cmake/dependency_utils.cmake
+index 0610da36c..144f9c606 100644
+--- a/src/cmake/dependency_utils.cmake
++++ b/src/cmake/dependency_utils.cmake
+@@ -621,10 +621,19 @@ macro (build_dependency_with_cmake pkgname)
+ 
+     # Make sure to inherit CMAKE_IGNORE_PATH
+     set(_pkg_CMAKE_ARGS ${_pkg_CMAKE_ARGS} ${_pkg_CMAKE_ARGS})
++    string(REPLACE "|" "\\;" _pkg_CMAKE_ARGS "${_pkg_CMAKE_ARGS}")
+     if (CMAKE_IGNORE_PATH)
+         string(REPLACE ";" "\\;" CMAKE_IGNORE_PATH_ESCAPED "${CMAKE_IGNORE_PATH}")
+         list(APPEND _pkg_CMAKE_ARGS "-DCMAKE_IGNORE_PATH=${CMAKE_IGNORE_PATH_ESCAPED}")
+     endif()
++    if (CMAKE_OSX_ARCHITECTURES)
++        string(REPLACE ";" "\\;" CMAKE_OSX_ARCHITECTURES_ESCAPED "${CMAKE_OSX_ARCHITECTURES}")
++        list(APPEND _pkg_CMAKE_ARGS "-DCMAKE_OSX_ARCHITECTURES=${CMAKE_OSX_ARCHITECTURES_ESCAPED}")
++    endif()
++    if (CMAKE_PREFIX_PATH)
++        string(REPLACE ";" "\\;" CMAKE_PREFIX_PATH_ESCAPED "${CMAKE_PREFIX_PATH}")
++        list(APPEND _pkg_CMAKE_ARGS "-DCMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH_ESCAPED}")
++    endif()
+ 
+     execute_process (COMMAND
+         ${CMAKE_COMMAND}

@@ -1,0 +1,118 @@
+// Copyright 2025 Autodesk, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compBliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Declare the root signature for the compute shader.
+// NOTE: DESCRIPTORS_VOLATILE is specified for root signature 1.0 behavior, where descriptors do not
+// have to be initialized in advance.
+#define ROOT_SIGNATURE                                                                             \
+    "RootFlags(0),"                                                                                \
+    "DescriptorTable(UAV(u0, numDescriptors = 10, flags = DESCRIPTORS_VOLATILE)), "                \
+    "RootConstants(b0, num32BitConstants = 2)"
+
+// Source (input) and destination (output) textures.
+RWTexture2D<float4> gAccumulation : register(u0);
+RWTexture2D<float4> gResult : register(u1);
+RWTexture2D<float> gDepthNDC : register(u2);
+RWTexture2D<float> gDepthView : register(u3);
+RWTexture2D<float4> gNormalRoughness : register(u4);
+RWTexture2D<float4> gBaseColorMetalness : register(u5);
+RWTexture2D<float4> gDiffuse : register(u6);
+RWTexture2D<float4> gGlossy : register(u7);
+RWTexture2D<float4> gDiffuseDenoised : register(u8);
+RWTexture2D<float4> gGlossyDenoised : register(u9);
+
+// Layout of accumulation properties.
+struct Accumulation
+{
+    uint sampleIndex;
+    bool isDenoisingEnabled;
+};
+
+// Constant buffer of accumulation values.
+ConstantBuffer<Accumulation> gSettings : register(b0);
+
+// A compute shader that accumulates path tracing results, optionally with denoising.
+// NOTE: The indicated thread group dimensions provide good occupancy for the current code, and
+// must match the values at the Dispatch() call.
+[RootSignature(ROOT_SIGNATURE)]
+[numthreads(16, 8, 1)]
+void Accumulation(uint3 threadID : SV_DispatchThreadID)
+{
+    // Skip any shader invocation where the thread ID is outside the screen dimensions, as the
+    // shader will be invoked with more threads than pixels when the dimension are not evenly
+    // divided by the thread group dimensions.
+    uint2 screenDims;
+    gAccumulation.GetDimensions(screenDims.x, screenDims.y);
+    if (any(threadID.xy >= screenDims))
+    {
+        return;
+    }
+
+    // Get the screen coordinates (2D) from the thread ID, and the color / alpha from the result of
+    // the most recent sample. Treat the result as the "extra" shading value, optionally used below.
+    float2 screenCoords = threadID.xy;
+    float4 result       = gResult[screenCoords];
+    float3 extra        = result.rgb;
+
+    // Combine data from textures if denoising is enabled. Otherwise the "result" value has the
+    // complete path tracing output.
+    if (gSettings.isDenoisingEnabled)
+    {
+        // Collect the necessary values. This includes a "hit factor" which is 0 for a background
+        // sample and 1 for a surface sample ("hit"). This is detected by testing for an infinite
+        // value in the view depth texture.
+        float hitFactor        = gDepthView[screenCoords].r != 1.#INF;
+        float3 baseColor       = gBaseColorMetalness[screenCoords].rgb;
+        float3 denoisedDiffuse = gDiffuseDenoised[screenCoords].rgb * hitFactor;
+        float3 denoisedGlossy  = gGlossyDenoised[screenCoords].rgb * hitFactor;
+
+        // Combine the following:
+        // - Extra: shading that is not denoised. See RadianceRayPayload for more information.
+        // - The denoised diffuse radiance, modulated by the base color (albedo).
+        // - The denoised glossy radiance.
+        result.rgb = extra + (denoisedDiffuse * baseColor) + denoisedGlossy;
+    }
+
+    // If the sample index is greater than zero, blend the new result color with the previous
+    // accumulation color.
+    uint sampleIndex = gSettings.sampleIndex;
+    if (sampleIndex > 0)
+    {
+        // Get the previous result. If it has an infinity component, then it represents an error
+        // pixel, and it should remain unmodified. Otherwise blend it with the new result.
+        float4 prevResult = gAccumulation[screenCoords];
+        if (any(isinf(prevResult)))
+        {
+            result = prevResult;
+        }
+        else
+        {
+            // Compute a blend factor (between the previous and new result) based on the sample
+            // index, with the new result having less influence with an increasing sample index,
+            // e.g. with sample index #4 (the 5th sample), the final result is 4/5 of the previous
+            // (accumulated) result and 1/5 of the new result. If denoising is enabled, this should
+            // be treated as temporal accumulation, with the new result having a fixed influence, so
+            // that older results are eventually discarded.
+            static const float TEMPORAL_BLEND_FACTOR = 0.1f;
+            float t =
+                gSettings.isDenoisingEnabled ? TEMPORAL_BLEND_FACTOR : 1.0f / (sampleIndex + 1);
+
+            // Blend between the previous result and the new result using the factor.
+            result = lerp(prevResult, result, t);
+        }
+    }
+
+    // Write to the output (accumulation) buffer.
+    gAccumulation[screenCoords] = result;
+}
